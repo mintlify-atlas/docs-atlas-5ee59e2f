@@ -1,0 +1,157 @@
+---
+title: "Release notes for the vLLM Ascend plugin"
+description: "Changelog, version history, branch strategy, and versioning policy for the vLLM Ascend plugin aligned with upstream vLLM releases."
+---
+
+vLLM Ascend follows a rapid release cadence closely aligned with upstream vLLM. Each release candidate tracks a corresponding vLLM version, and stable releases undergo additional validation on Ascend NPU hardware. The project publishes release candidates frequently to surface issues early and gather community feedback.
+
+## Version alignment with vLLM
+
+vLLM Ascend version numbers mirror the upstream vLLM version they are built against. For example, `vllm-ascend v0.19.1rc1` is built on top of `vllm v0.19.1`. This makes it straightforward to identify which upstream features and fixes are included.
+
+| vLLM Ascend branch | Based on vLLM | Status |
+|--------------------|---------------|--------|
+| `main` | vLLM main | Development |
+| `releases/v0.19.1` | vLLM v0.19.1 | Release candidate |
+| `releases/v0.13.0` | vLLM v0.13.0 | Stable |
+
+<Note>
+For the complete list of releases and downloadable artifacts, see the [GitHub releases page](https://github.com/vllm-project/vllm-ascend/releases).
+</Note>
+
+---
+
+## v0.19.1rc1 — 2026-04-30
+
+First release candidate of v0.19.1, based on **vLLM v0.19.1**. Includes significant performance optimizations, new model support, expanded hardware coverage, and important bug fixes.
+
+### Highlights
+
+- **DFlash attention backend** — Added DFlash backend with `FULL_DECODE_ONLY` support for improved inference performance.
+- **Zero bubble async scheduling** — Implemented zero-bubble optimization for async scheduling and speculative decoding, significantly reducing scheduling overhead.
+- **A2/A3 attention operator upgrade** — Replaced `npu_fusion_attention` with `_npu_flash_attention_unpad` for better performance on A2 and A3 hardware.
+- **Eagle3 + MiniMax-M2.5** — Applied Eagle3 speculative decoding to MiniMax-M2.5 for faster inference.
+- **C8 INT8 KV cache for GQA** — Added C8 (INT8 KV cache) support for GQA attention models, including DeepSeek-V3.1 with PD disaggregation.
+- **Bailing model support** — Full support for Bailing MoE model including linear adaptation and ModelSlim quantization.
+
+### New features
+
+- Flash Comm V1 for Qwen3-VL multimodal models
+- Eagle + PCP + full graph mode support
+- Dynamic chunk for chunked pipeline parallelism
+- Hamming-based sparse attention inference framework
+- GLM4.7 C8 (INT8 KV cache) support
+- Initial MoE support for Model Runner V2
+- XLite backend expansion: GLM-4.7 and Qwen3-VL-MoE
+- Fused W4A8 kernel (dispatch + FFN + combine in one kernel)
+- Mamba prefix caching via layerwise connector
+- Qwen3-Next hybrid attention in piecewise and full-decode-only modes
+
+### Performance improvements
+
+- MLA PCP prefill optimization avoiding unnecessary tail KV projection
+- Asynchronous scheduling issuance bubble optimization
+- Batch KV cache offloading via `aclrtMemcpyBatchAsync`
+- Optimized split_qkv_tp_rmsnorm_rope operators
+- HCCL process group reuse on Ascend
+
+### Dependencies
+
+- **vLLM**: upgraded to v0.19.1
+- **Transformers**: upgraded to 5.5.3 (major version — significant API changes)
+- **lm-eval**: upgraded to 0.4.11 for transformers 5.x compatibility
+- **New**: memcache and memfabric added to requirements
+
+### Known issues
+
+- When running GLM-5 / GLM-5.1 in single-node (non-PD-disaggregated) scenarios, incorrect results or runtime errors may occur. See [#8843](https://github.com/vllm-project/vllm-ascend/issues/8843) for details and workarounds.
+- `triton-ascend` may fail to compile with a g++ internal compiler error (segmentation fault). Workaround: upgrade to `triton-ascend==3.2.0.dev20260322` and clear the Triton cache with `rm -rf ~/.triton/cache/*`. See [#7782](https://github.com/vllm-project/vllm-ascend/issues/7782).
+- Upgrade `torch-npu` to `2.9.0.post1+git4c901a4` to avoid known issues. If CANN has been upgraded to 9.0.0, upgrade `torch-npu` to `2.9.0.post2` simultaneously.
+
+---
+
+## v0.18.0rc1 — 2026-04-01
+
+First release candidate of v0.18.0.
+
+### Highlights
+
+- C8 (INT8 KV cache) is now supported for GQA attention models and on DeepSeek-V3.1 with PD disaggregation.
+- DeepSeek models are now supported on A5 hardware through new MLA operators.
+
+### New features
+
+- Flash Comm V1 support for VL models with MLA
+- Separate attention backends for target and draft models in speculative decoding
+- VL MoE models now support sequence parallelism
+- Qwen VL models now support `w8a8_mxfp8` quantization
+
+### Performance improvements
+
+- Optimized Triton operator recompilation to reduce redundant rebuilds
+- Optimized Qwen3.5 and Qwen3-Next GDN prefill path with prebuilt chunk metadata
+- Simplified FIA prefill context merge path
+
+### Known issues
+
+- When running DeepSeek-R1 W8A8 with MTP and KV Pool enabled under high concurrency, a `ValueError: Counters can only be incremented by non-negative amounts` may occur. See [#7489](https://github.com/vllm-project/vllm-ascend/issues/7489).
+- FIA does not support all MHA head dimensions when using `tp-size >= 16`. See [#7729](https://github.com/vllm-project/vllm-ascend/pull/7729).
+- MiniMax-M2.5 PD disaggregation shows a ~13% regression on the GPQA benchmark. Not recommended for this configuration.
+
+---
+
+## v0.17.0rc1 — 2026-03-15
+
+First release candidate of v0.17.0.
+
+### Highlights
+
+- Ascend 950 chip support added.
+- AclGraph (graph mode) now supported for Model Runner V2.
+- Unified parallelized speculative decoding enables parallel draft inference schemes simultaneously.
+
+### New features
+
+- Auto-detect quantization format from model files — `--quantization ascend` no longer required
+- Qwen3.5 support
+- FlashLB algorithm for EPLB with per-step heat collection and multi-stage load balancing
+- LoRA with tensor parallel and `--fully-sharded-loras` fixed
+- LMCacheAscendConnector for KV cache pooling
+- W8A8C8 quantization for DeepSeek-V3.2 in PD-mix mode
+
+---
+
+## v0.16.0rc1 — 2026-03-09
+
+First release candidate of v0.16.0.
+
+### Highlights
+
+- Qwen3-Omni quantization adaptation and optimization.
+- GLM5-W8A8 quantization support by parameterizing hardcoded MLA dimensions.
+
+### Deprecation and breaking changes
+
+- `enable_flash_comm_v1` renamed back to `enable_sp`.
+- Auto-detect quantization format from model files reverted in this release. Add `--quantization ascend` for ModelSlim-quantized models.
+- CANN upgraded to 8.5.1 — upgrade manually if not using the official image.
+
+---
+
+## v0.13.0 — 2026-02-06
+
+Stable release. This is the current long-term stable version of vLLM Ascend.
+
+<Tip>
+If you need a stable, production-validated release, use `v0.13.0`. The official documentation for this version is at [docs.vllm.ai/projects/ascend/en/v0.13.0/](https://docs.vllm.ai/projects/ascend/en/v0.13.0/).
+</Tip>
+
+## Versioning policy summary
+
+- vLLM Ascend version numbers align with the upstream vLLM version (for example, `v0.19.1` tracks `vllm==0.19.1`).
+- Release candidates (`rc1`, `rc2`, …) are published first to allow community testing.
+- A final stable release is cut after validation on Ascend hardware.
+- The `main` branch tracks the latest upstream vLLM `main` and may be unstable.
+- Stable release branches follow the pattern `releases/vX.Y.Z`.
+
+For the full changelog including individual pull requests, visit the [GitHub releases page](https://github.com/vllm-project/vllm-ascend/releases).

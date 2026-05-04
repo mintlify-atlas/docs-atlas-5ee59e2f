@@ -1,0 +1,180 @@
+---
+title: "ACL graph mode for Ascend NPU inference optimization"
+description: "Speed up inference on Ascend NPUs with ACLGraph and Npugraph_ex: capture computation graphs once to eliminate kernel launch overhead and fuse operators."
+---
+
+Graph mode captures your model's computation graph once and replays it at inference time, eliminating per-iteration kernel launch overhead. On Ascend NPUs, vLLM implements graph mode through two complementary mechanisms: **ACLGraph** (runtime capture and replay via `torch.npu.NPUGraph`) and **Npugraph_ex** (compile-time FX graph optimization via torchair). Together they reduce latency and improve throughput, especially at small to medium batch sizes.
+
+Graph mode is enabled by default. You opt out by setting `enforce_eager=True`.
+
+## Graph paths on Ascend
+
+vLLM Ascend provides two graph execution paths:
+
+| Path | Default | Description |
+|---|---|---|
+| ACLGraph + Npugraph_ex | Yes | Compile-time operator fusion (Npugraph_ex) followed by runtime capture and replay (ACLGraph) |
+| XliteGraph | No | Alternative path for Llama, Qwen dense/MoE, and Qwen3-VL; requires separate `xlite` installation |
+
+## Graph modes
+
+The `cudagraph_mode` setting controls how much of the computation is captured:
+
+| Mode | Compile-time | Runtime | Npugraph_ex |
+|---|---|---|---|
+| `FULL` / `FULL_DECODE_ONLY` | Npugraph_ex FX optimization | ACLGraph capture + replay | Enabled (default) |
+| `PIECEWISE` | Fusion passes only | ACLGraph capture + replay | Disabled |
+| `NONE` | None | Eager execution | Disabled |
+
+`FULL_DECODE_ONLY` captures only the decode path, which is the most common and efficient configuration for production deployments.
+
+## Using ACLGraph (default)
+
+ACLGraph is active whenever `cudagraph_mode` is not `NONE`. No explicit configuration is needed for most models.
+
+<Tabs>
+  <Tab title="Online (default)">
+    ```bash
+    # Graph mode is on by default
+    vllm serve Qwen/Qwen3-0.6B
+    ```
+  </Tab>
+  <Tab title="Online (explicit mode)">
+    ```bash
+    vllm serve Qwen/Qwen3-0.6B \
+        --compilation-config '{"cudagraph_mode": "PIECEWISE"}'
+    ```
+  </Tab>
+  <Tab title="Offline">
+    ```python
+    from vllm import LLM
+
+    # Graph mode is on by default
+    llm = LLM(model="path/to/Qwen3-0.6B")
+    outputs = llm.generate("Hello, how are you?")
+    ```
+  </Tab>
+</Tabs>
+
+## Npugraph_ex compile-time optimization
+
+Npugraph_ex runs during model compilation and fuses multiple operators into single kernels—for example, `add + rms_norm → npu_add_rms_norm`—before ACLGraph captures the result. This reduces the number of kernels the NPU must launch per iteration.
+
+Npugraph_ex is **enabled by default** in `FULL` and `FULL_DECODE_ONLY` modes. You can control it explicitly:
+
+<Tabs>
+  <Tab title="Enable with static kernel">
+    ```bash
+    vllm serve Qwen/Qwen2-7B-Instruct \
+        --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": true}}'
+    ```
+  </Tab>
+  <Tab title="Disable Npugraph_ex">
+    ```bash
+    vllm serve Qwen/Qwen2-7B-Instruct \
+        --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    from vllm import LLM
+
+    llm = LLM(
+        model="path/to/Qwen2-7B-Instruct",
+        additional_config={
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": True,
+                "enable_static_kernel": True,
+            }
+        }
+    )
+    ```
+  </Tab>
+</Tabs>
+
+## Using XliteGraph (optional)
+
+XliteGraph is an alternative graph path supported for Llama, Qwen dense, Qwen MoE, and Qwen3-VL model families. It requires the `xlite` package to be installed separately.
+
+```bash
+pip install xlite
+```
+
+```bash
+vllm serve path/to/Qwen3-32B \
+    --tensor-parallel-size 8 \
+    --additional-config '{"xlite_graph_config": {"enabled": true, "full_mode": true}}'
+```
+
+<Warning>
+XliteGraph is an alternative path, not a drop-in replacement for ACLGraph in all scenarios. Model and backend coverage is still evolving. Verify compatibility with your specific model before using it in production.
+</Warning>
+
+## Capture sizes and stream budget
+
+ACLGraph captures a graph for each supported batch size (called a capture size). At runtime, incoming batches are padded to the nearest capture size and the corresponding graph is replayed. If the batch exceeds the largest capture size, execution falls back to eager mode.
+
+The default capture sizes follow upstream vLLM's bucketing scheme:
+- `1, 2, 4`
+- Multiples of `8` from `8` to `255`
+- Multiples of `16` from `256` up to `max_cudagraph_capture_size`
+
+On Ascend, the number of captured graphs is additionally limited by the device's **stream budget**. If your model is large, has many layers, or uses context parallelism, the platform may automatically trim the capture size list to stay within the budget.
+
+<Warning>
+If you see a stream exhaustion error during startup, reduce the number of captured graphs by explicitly setting `cudagraph_capture_sizes` to a smaller list:
+
+```bash
+vllm serve Qwen/Qwen3-32B \
+    --compilation-config '{"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 128]}'
+```
+
+Alternatively, set `HCCL_OP_EXPANSION_MODE=AIV` to increase the available stream budget, which can allow more capture sizes.
+</Warning>
+
+## Attention backend and graph mode compatibility
+
+Not all attention backends support every graph mode. vLLM Ascend automatically adjusts the effective mode when the requested mode is not supported:
+
+| Attention backend | Graph support |
+|---|---|
+| `attention_v1` | All modes including mixed prefill/decode batches |
+| `context_parallel/attention_cp` | All modes including mixed prefill/decode batches |
+| `mla_v1` | Uniform batches only; full graph is more restricted |
+| `context_parallel/mla_cp` | Uniform batches only |
+| `sfa_v1` | Uniform batches only |
+
+This means the graph mode you configure may be narrowed to a more conservative mode depending on the model you serve. Check the startup logs to see which effective mode is active.
+
+## Limitations
+
+- Graph mode is only supported on the **V1 engine**.
+- `ASCEND_LAUNCH_BLOCKING=1` is incompatible with ACLGraph. Unset this variable when graph mode is active.
+- `cudagraph_mode="FULL"` is not fully supported in context parallel scenarios. Use `FULL_DECODE_ONLY` or `PIECEWISE` instead.
+- Encoder-decoder models are restricted to `PIECEWISE` mode.
+- `FULL_AND_PIECEWISE` is normalized to `PIECEWISE` on Ascend.
+
+## Fallback to eager mode
+
+If you encounter graph mode issues during development or debugging, fall back to eager mode:
+
+<Tabs>
+  <Tab title="Online">
+    ```bash
+    vllm serve path/to/your/model --enforce-eager
+    ```
+  </Tab>
+  <Tab title="Offline">
+    ```python
+    from vllm import LLM
+
+    llm = LLM(model="path/to/your/model", enforce_eager=True)
+    ```
+  </Tab>
+</Tabs>
+
+## Performance impact
+
+Graph mode provides the largest speedups at small and medium batch sizes where per-kernel launch overhead dominates. At large batch sizes, the model becomes compute-bound and the relative benefit of graph mode decreases. Npugraph_ex operator fusion provides an additional improvement on top of ACLGraph by reducing the total number of kernels scheduled per iteration.
+
+For decode-only workloads, `FULL_DECODE_ONLY` mode typically gives the best results. For mixed prefill and decode at large scale, `PIECEWISE` is the safer and more widely supported choice.

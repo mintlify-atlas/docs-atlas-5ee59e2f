@@ -1,0 +1,376 @@
+---
+title: "Multimodal model inference on Ascend NPU"
+description: "Run vision-language models including Qwen3-VL, LLaVA-OneVision, and Qwen-VL on Ascend NPU with image and video inputs via the OpenAI-compatible API."
+---
+
+The vLLM Ascend plugin supports a range of vision-language models (VLMs) that accept image, video, and text inputs in combination. This page covers the supported models, how to start the server, and how to send multimodal requests using the OpenAI-compatible API.
+
+## Supported vision-language models
+
+| Model | Support | Hardware | Notes |
+|---|---|---|---|
+| Qwen3-VL (2B / 4B / 8B / 32B) | ✅ | A2 / A3 | Dense VLM with image and multi-image reasoning |
+| Qwen3-VL-30B-A3B | ✅ | A2 / A3 | MoE VLM with image and video inputs |
+| LLaVA-OneVision-Qwen2-0.5B-OV | ✅ | A2 | Compact multimodal model on single NPU |
+| Qwen2.5-VL (3B) | ✅ (310P) | Atlas 300I Duo | Limited to float16 on 310P hardware |
+| Qwen3-VL-Embedding | 🔵 (experimental) | A2 / A3 | Vision-language embeddings |
+| Qwen3-VL-Reranker | 🔵 (experimental) | A2 / A3 | Vision-language reranking |
+
+<Note>
+  For Atlas 300I Duo (310P hardware), multimodal inference is experimental. Only eager mode and float16 are supported on that platform.
+</Note>
+
+---
+
+## Qwen3-VL (dense vision-language models)
+
+The Qwen3-VL series supports single-image and multi-image understanding out of the box. The examples below use `Qwen3-VL-8B-Instruct` (single NPU) and `Qwen3-VL-32B-Instruct` (multi-NPU).
+
+### Environment setup
+
+<Tabs>
+  <Tab title="Single NPU">
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:<version>
+
+    docker run --rm \
+      --name vllm-ascend \
+      --shm-size=1g \
+      --device /dev/davinci0 \
+      --device /dev/davinci_manager \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /root/.cache:/root/.cache \
+      -p 8000:8000 \
+      -it $IMAGE bash
+    ```
+  </Tab>
+  <Tab title="Multi-NPU">
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:<version>
+
+    docker run --rm \
+      --name vllm-ascend \
+      --shm-size=1g \
+      --net=host \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci_manager \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /root/.cache:/root/.cache \
+      -it $IMAGE bash
+    ```
+  </Tab>
+</Tabs>
+
+Set the required environment variables inside the container:
+
+```bash
+export VLLM_USE_MODELSCOPE=True
+export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
+```
+
+### Online serving
+
+<Tabs>
+  <Tab title="Qwen3-VL-8B (single NPU)">
+    ```bash
+    vllm serve Qwen/Qwen3-VL-8B-Instruct \
+      --dtype bfloat16 \
+      --max_model_len 16384 \
+      --max-num-batched-tokens 16384
+    ```
+  </Tab>
+  <Tab title="Qwen3-VL-32B (multi-NPU)">
+    ```bash
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export VLLM_USE_V1=1
+
+    vllm serve Qwen/Qwen3-VL-32B-Instruct \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --async-scheduling \
+      --tensor-parallel-size 2 \
+      --max-model-len 30000 \
+      --max-num-batched-tokens 50000 \
+      --max-num-seqs 30 \
+      --no-enable-prefix-caching \
+      --trust-remote-code \
+      --dtype bfloat16
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  Always set `--max-model-len` explicitly. The default context length for Qwen3-VL models is very large (128K–256K tokens). Without a cap, the model may fail to start due to KV cache OOM on smaller NPU configurations.
+</Note>
+
+### Sending image requests via the OpenAI API
+
+Use `image_url` inside the message content array to pass images. The server accepts HTTP URLs as well as base64-encoded data URIs.
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-VL-8B-Instruct",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
+        {"type": "text", "text": "What is the text in the illustration?"}
+      ]}
+    ]
+  }'
+```
+
+### Offline inference with image inputs
+
+Install `qwen_vl_utils` to handle image preprocessing:
+
+```bash
+pip install qwen_vl_utils --extra-index-url https://download.pytorch.org/whl/cpu/
+```
+
+```python
+from transformers import AutoProcessor
+from vllm import LLM, SamplingParams
+from qwen_vl_utils import process_vision_info
+
+MODEL_PATH = "Qwen/Qwen3-VL-8B-Instruct"
+
+llm = LLM(
+    model=MODEL_PATH,
+    max_model_len=16384,
+    limit_mm_per_prompt={"image": 10},
+)
+
+sampling_params = SamplingParams(max_tokens=512)
+
+messages = [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {
+        "role": "user",
+        "content": [
+            {
+                "type": "image",
+                "image": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png",
+                "min_pixels": 224 * 224,
+                "max_pixels": 1280 * 28 * 28,
+            },
+            {"type": "text", "text": "Please provide a detailed description of this image"},
+        ],
+    },
+]
+
+processor = AutoProcessor.from_pretrained(MODEL_PATH)
+prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+image_inputs, _, _ = process_vision_info(messages, return_video_kwargs=True)
+mm_data = {}
+if image_inputs is not None:
+    mm_data["image"] = image_inputs
+
+outputs = llm.generate([{"prompt": prompt, "multi_modal_data": mm_data}], sampling_params)
+print(outputs[0].outputs[0].text)
+```
+
+### Accuracy reference (Qwen3-VL-8B-Instruct, vllm-ascend 0.11.0rc3)
+
+| Dataset | Metric | Score |
+|---|---|---|
+| MMMU-val | accuracy | 0.5389 |
+
+---
+
+## Qwen3-VL-30B-A3B (vision-language MoE)
+
+`Qwen3-VL-30B-A3B-Instruct` is a MoE vision-language model that supports both image and video inputs. It requires 1× Atlas 800I A2 (64 GB × 8) or 1× Atlas 800 A3 (64 GB × 16).
+
+### Docker setup
+
+```bash
+export IMAGE=quay.io/ascend/vllm-ascend:<version>
+
+docker run --rm \
+  --name vllm-ascend \
+  --shm-size=1g \
+  --net=host \
+  --device /dev/davinci0 \
+  --device /dev/davinci1 \
+  --device /dev/davinci_manager \
+  --device /dev/devmm_svm \
+  --device /dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -v /root/.cache:/root/.cache \
+  -v /data:/data \
+  -v /path/to/your/media:/media \
+  -it $IMAGE bash
+```
+
+### Image inference
+
+```bash
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --tensor-parallel-size 2 \
+  --enable-expert-parallel \
+  --limit-mm-per-prompt.video 0 \
+  --max-model-len 128000
+```
+
+<Note>
+  Set `--limit-mm-per-prompt.video 0` when your workload is image-only. Enabling video input reserves additional NPU memory for long video embeddings even when no video is sent.
+</Note>
+
+Send an image request:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
+        {"type": "text", "text": "What is the text in the illustration?"}
+      ]}
+    ],
+    "max_completion_tokens": 100
+  }'
+```
+
+### Video inference
+
+```bash
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --tensor-parallel-size 2 \
+  --enable-expert-parallel \
+  --max-model-len 128000 \
+  --allowed-local-media-path /media
+```
+
+Send a video request using a local file:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": [
+        {"type": "video_url", "video_url": {"url": "file:///media/test.mp4"}},
+        {"type": "text", "text": "What is in this video?"}
+      ]}
+    ],
+    "max_completion_tokens": 100
+  }'
+```
+
+---
+
+## LLaVA-OneVision (single NPU)
+
+`llava-hf/llava-onevision-qwen2-0.5b-ov-hf` is a compact 0.5B multimodal model that runs on a single Atlas A2 NPU. It supports text-only generation, image understanding, and multi-image reasoning.
+
+### Environment setup
+
+```bash
+export IMAGE=quay.io/ascend/vllm-ascend:<version>
+
+docker run --rm \
+  --name vllm-ascend \
+  --shm-size=1g \
+  --net=host \
+  --device /dev/davinci0 \
+  --device /dev/davinci_manager \
+  --device /dev/devmm_svm \
+  --device /dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -v /root/.cache:/root/.cache \
+  -it $IMAGE bash
+```
+
+### Start the server
+
+```bash
+export MODEL_PATH="llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
+
+vllm serve "${MODEL_PATH}" \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --served-model-name LLaVA-OneVision-0.5B \
+  --trust-remote-code \
+  --gpu-memory-utilization 0.8
+```
+
+### Text-only request
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "LLaVA-OneVision-0.5B",
+    "messages": [{"role": "user", "content": "Say hello in one short sentence."}],
+    "max_completion_tokens": 16,
+    "temperature": 0
+  }'
+```
+
+### Image understanding request
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "LLaVA-OneVision-0.5B",
+    "messages": [
+      {"role": "user", "content": [
+        {"type": "text", "text": "Describe this image briefly."},
+        {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}}
+      ]}
+    ],
+    "max_completion_tokens": 64,
+    "temperature": 0
+  }'
+```
+
+### Accuracy reference (LLaVA-OneVision-0.5B, Atlas A2)
+
+| Dataset | Metric | Score |
+|---|---|---|
+| ceval-valid | acc | 0.42 |
+
+---
+
+## Known limitations
+
+<Warning>
+  The following limitations apply as of vllm-ascend v0.11.x. Check the release notes for updates.
+</Warning>
+
+- **Prefill-decode disaggregation**: Not supported for LLaVA-OneVision or Qwen3-VL models.
+- **Max model length**: Always specify `--max-model-len` explicitly for VLMs. Auto-detection may resolve to very large values (128K–256K) that exceed available NPU memory.
+- **Video memory**: Enabling video inputs reserves additional memory for long video embeddings. Set `--limit-mm-per-prompt.video 0` if you only need image inference.
+- **Atlas 300I Duo**: Only eager mode (`--enforce-eager`) and `float16` dtype are supported. BFloat16 operations may fail.
+- **Multi-modal PD disaggregation**: Not yet supported for vision-language models on Ascend.

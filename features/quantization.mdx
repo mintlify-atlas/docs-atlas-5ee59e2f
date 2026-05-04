@@ -1,0 +1,173 @@
+---
+title: "Quantization support for Ascend NPU inference"
+description: "Use W8A8, W4A8, or W4A4 quantization on Ascend NPU with ModelSlim or LLM-Compressor to reduce memory usage and improve inference throughput."
+---
+
+Quantization lowers the numerical precision of model weights and activations, reducing memory footprint and improving inference throughput on Ascend NPUs. vLLM Ascend supports multiple quantization methods and two main quantization toolchains: **ModelSlim** (Ascend-native) and **LLM-Compressor**.
+
+## Supported quantization algorithms
+
+| Algorithm | Weights | Activations | Weight granularity | Activation granularity | Type |
+|---|---|---|---|---|---|
+| `W8A8` | INT8 | INT8 | Per-channel | Per-tensor | Static |
+| `W8A8_DYNAMIC` | INT8 | INT8 | Per-channel | Per-token | Dynamic |
+| `W4A8_DYNAMIC` | INT4 | INT8 | Per-group | Per-token | Dynamic |
+| `W4A4_FLATQUANT_DYNAMIC` | INT4 | INT4 | Per-channel | Per-token | Dynamic |
+| `W8A16` | INT8 | FP16/BF16 | Per-channel | Per-tensor | Static |
+| `W4A16` | INT4 | FP16/BF16 | Per-group | Per-tensor | Static |
+| `W8A8_MIX` | INT8 | INT8 | Per-channel | Per-tensor/token | Mixed |
+
+**Static vs dynamic:** Static quantization uses precomputed scaling factors for better throughput. Dynamic quantization computes per-token scaling factors at runtime for higher accuracy at a small performance cost.
+
+## Quantization tools
+
+### ModelSlim (recommended for Ascend)
+
+[ModelSlim](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md) is Ascend's native compression toolkit. It is the recommended tool for producing weights that work with `--quantization ascend`.
+
+<Steps>
+  <Step title="Install ModelSlim">
+    ```bash
+    git clone https://gitcode.com/Ascend/msit.git -b br_release_MindStudio_8.3.0_20261231
+    cd msit/msmodelslim
+    bash install.sh
+    ```
+  </Step>
+  <Step title="Quantize your model">
+    The following example generates W8A8 weights for a Qwen3-MoE model:
+
+    ```bash
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:False
+    export MODEL_PATH="/path/to/your/model"
+    export SAVE_PATH="/path/to/your/quantized_model"
+
+    cd example/Qwen3-MOE
+    python3 quant_qwen_moe_w8a8.py \
+        --model_path $MODEL_PATH \
+        --save_path $SAVE_PATH \
+        --anti_dataset ../common/qwen3-moe_anti_prompt_50.json \
+        --calib_dataset ../common/qwen3-moe_calib_prompt_50.json \
+        --trust_remote_code True
+    ```
+  </Step>
+  <Step title="Serve the quantized model">
+    Pass `--quantization ascend` to tell vLLM to use the Ascend quantization backend:
+
+    ```bash
+    vllm serve /path/to/your/quantized_model \
+        --quantization ascend \
+        --tensor-parallel-size 8 \
+        --max-model-len 32768
+    ```
+  </Step>
+</Steps>
+
+<Note>
+Pre-quantized models are available on ModelScope. For example, DeepSeek-R1-W8A8 is at `vllm-ascend/DeepSeek-R1-W8A8`. You can use these directly without running quantization yourself.
+</Note>
+
+### LLM-Compressor
+
+[LLM-Compressor](https://github.com/vllm-project/llm-compressor) is an alternative tool that produces weights compatible with vLLM without the `--quantization ascend` flag.
+
+```bash
+pip install llmcompressor
+```
+
+Run the provided example scripts to quantize dense or MoE models:
+
+```bash
+# Dense model (W8A8 dynamic)
+cd examples/quantization/llm-compressor
+python3 w8a8_int8_dynamic.py
+
+# MoE model (W8A8 dynamic)
+python3 w8a8_int8_dynamic_moe.py
+```
+
+LLM-Compressor supports `W8A8` and `W8A8_DYNAMIC` schemes. For other quantization types, use ModelSlim.
+
+## Running quantized models
+
+### Online inference
+
+```bash
+vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
+    --quantization ascend \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --max-model-len 32768 \
+    --gpu-memory-utilization 0.9
+```
+
+### Offline inference
+
+```python
+from vllm import LLM, SamplingParams
+
+sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
+
+llm = LLM(
+    model="/path/to/your/quantized_model",
+    quantization="ascend",
+    tensor_parallel_size=8,
+    max_model_len=32768,
+    trust_remote_code=True,
+)
+
+outputs = llm.generate(["The future of AI is"], sampling_params)
+for output in outputs:
+    print(output.outputs[0].text)
+```
+
+## MLAPO optimization
+
+MLAPO is an Ascend-specific optimization for the Multi-head Latent Attention (MLA) mechanism used in DeepSeek W8A8 series models. When enabled, it fuses additional operations to improve decode throughput.
+
+MLAPO is **enabled by default**. Control it with the `VLLM_ASCEND_ENABLE_MLAPO` environment variable:
+
+```bash
+# Disable MLAPO to reduce NPU memory at the cost of some throughput
+export VLLM_ASCEND_ENABLE_MLAPO=0
+```
+
+<Warning>
+MLAPO consumes additional NPU memory. If you are running near your memory limit, disable it to free headroom for larger batch sizes or longer sequences.
+</Warning>
+
+## NZ weight format optimization
+
+The `VLLM_ASCEND_ENABLE_NZ` variable controls whether quantized weights are converted to the FRACTAL_NZ format, which accelerates matrix multiplication on Ascend hardware:
+
+| Value | Behavior |
+|---|---|
+| `0` | Disable NZ format conversion |
+| `1` (default) | Enable NZ only for quantized weights |
+| `2` | Enable NZ as broadly as possible |
+
+You can also enable NZ per-serve through `--additional-config`:
+
+```bash
+vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
+    --quantization ascend \
+    --additional-config '{"enable_weight_nz_layout": true}'
+```
+
+## Memory savings vs accuracy trade-offs
+
+<CardGroup cols={3}>
+  <Card title="W8A8 — balanced" icon="scale-balanced">
+    Best for most production workloads. Reduces memory by roughly 50% compared to BF16 with minimal accuracy loss. Preferred for DeepSeek and Qwen models.
+  </Card>
+  <Card title="W4A8 — aggressive" icon="compress">
+    Further reduces weight memory to 4-bit while keeping activations at 8-bit. Suitable for very large MoE models where memory is the primary constraint.
+  </Card>
+  <Card title="W4A4 — maximum compression" icon="arrow-down-wide-short">
+    Highest compression ratio. Uses FlatQuant to smooth activation distributions before 4-bit dynamic quantization. Expect some accuracy degradation; validate on your target task.
+  </Card>
+</CardGroup>
+
+<Warning>
+Not all models support all quantization types. Check that the quantized model's `quant_model_description.json` uses algorithms compatible with your deployment. Running a model with an unsupported scheme will raise a load-time error.
+</Warning>

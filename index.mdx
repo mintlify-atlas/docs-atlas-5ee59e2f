@@ -1,133 +1,103 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
-icon: 'star'
+title: "vLLM Ascend Plugin: LLM Inference on Ascend NPU"
+description: "Run vLLM seamlessly on Huawei Ascend NPUs. Hardware plugin for Atlas A2 and A3 series with full parallelism, quantization, and graph mode support."
 ---
 
-## Setting up
+vLLM Ascend Plugin (`vllm-ascend`) is a community-maintained hardware plugin that enables running [vLLM](https://github.com/vllm-project/vllm) seamlessly on Huawei Ascend NPUs. It implements the [hardware-pluggable interface](https://github.com/vllm-project/vllm/issues/11162) so that popular open-source models — including Transformer, MoE, Embedding, and Multi-modal LLMs — run on Atlas A2 and A3 series hardware without modifying vLLM itself.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install via pip or Docker. Covers CANN setup, pip install, and building from source.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first LLM inference on Ascend NPU in minutes with a ready-to-use container.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Supported Models" icon="brain" href="/user-guide/supported-models">
+    Browse the full model compatibility matrix including DeepSeek, Qwen3, GLM, and more.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Features" icon="bolt" href="/features/parallelism">
+    Explore tensor parallelism, expert parallelism, quantization, and ACL graph mode.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What vLLM Ascend supports
 
-Everything you need to create world-class documentation.
+<CardGroup cols={3}>
+  <Card title="Atlas A2 & A3 NPUs" icon="microchip">
+    Supports Atlas 800I A2/A3 inference series and Atlas 800T A2/A3 training series hardware.
+  </Card>
+  <Card title="Expert Parallelism" icon="share-nodes">
+    Large-scale EP for MoE models like DeepSeek V3 and Qwen3-MoE across multiple NPUs.
+  </Card>
+  <Card title="Quantization" icon="compress">
+    W8A8, W4A8, and W4A4 quantization to reduce memory and improve throughput.
+  </Card>
+  <Card title="ACL Graph Mode" icon="diagram-project">
+    NPU graph capture for optimized kernel execution and reduced launch overhead.
+  </Card>
+  <Card title="PD Disaggregation" icon="arrows-split-up-and-left">
+    Prefill-Decode disaggregation with Mooncake backend for large-scale serving.
+  </Card>
+  <Card title="OpenAI-Compatible API" icon="code">
+    Drop-in replacement for OpenAI API — serve any model with `vllm serve`.
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Getting started
 
-## Make your content agent ready
+<Steps>
+  <Step title="Set up your environment">
+    Pull the official Docker image for your hardware (Atlas A2 or A3) and OS (Ubuntu or openEuler).
 
-Make your docs work for humans and AI agents alike.
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0
+    docker run --rm --name vllm-ascend --shm-size=1g \
+      --device /dev/davinci0 --device /dev/davinci_manager \
+      --device /dev/devmm_svm --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /root/.cache:/root/.cache \
+      -p 8000:8000 -it $IMAGE bash
+    ```
+  </Step>
+  <Step title="Run offline inference">
+    Use the vLLM `LLM` class to run batched inference directly on the NPU.
 
-<Columns cols={2}>
-  <Card
-    title="Prompt component"
-    icon="robot"
-    href="/agent-ready/prompt"
-  >
-    Embed shareable AI prompts readers can copy or open in Cursor.
-  </Card>
-  <Card
-    title="Visibility"
-    icon="eye"
-    href="/agent-ready/visibility"
-  >
-    Show different content to humans and agents reading your docs.
-  </Card>
-  <Card
-    title="Contextual menu"
-    icon="bolt"
-    href="/agent-ready/contextual"
-  >
-    Give readers one-click access to Claude, ChatGPT, Cursor, and more.
-  </Card>
-  <Card
-    title="AI coding tools"
-    icon="wand-magic-sparkles"
-    href="/ai-tools/claude-code"
-  >
-    Set up Claude Code, Cursor, or Windsurf with Mintlify's skill.
-  </Card>
-</Columns>
+    ```python
+    from vllm import LLM, SamplingParams
 
-## Need inspiration?
+    llm = LLM(model="Qwen/Qwen3-0.6B")
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+    ```
+  </Step>
+  <Step title="Or serve via OpenAI API">
+    Start an OpenAI-compatible server and query it with any OpenAI client.
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+    ```bash
+    vllm serve Qwen/Qwen3-0.6B
+    ```
+
+    ```bash
+    curl http://localhost:8000/v1/completions \
+      -H "Content-Type: application/json" \
+      -d '{"model": "Qwen/Qwen3-0.6B", "prompt": "Beijing is a", "max_completion_tokens": 20}'
+    ```
+  </Step>
+</Steps>
+
+## Supported hardware
+
+| Hardware Series | Status | Notes |
+|---|---|---|
+| Atlas A2 Training (800T A2, 900 A2 PoD) | Stable | Primary development target |
+| Atlas 800I A2 Inference | Stable | Full feature support |
+| Atlas A3 Training (800T A3, 900 A3 SuperPoD) | Stable | Larger EP configurations |
+| Atlas 800I A3 Inference | Stable | High-throughput inference |
+| Atlas 300I Duo | Experimental | Limited feature set |
+
+<Note>
+  vLLM Ascend Plugin requires CANN 8.5.1, PyTorch 2.9.0, and torch-npu 2.9.0. See the [installation guide](/installation) for the complete requirements list.
+</Note>

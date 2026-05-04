@@ -1,0 +1,445 @@
+---
+title: "Install vLLM Ascend Plugin on Ascend NPU"
+description: "Install vLLM Ascend Plugin via pip or Docker on Atlas A2, A3, and 300I Duo. Covers CANN setup, pip install, build from source, and multi-node verification."
+---
+
+This page explains how to install `vllm-ascend` on a machine with Ascend NPU hardware. You can install using a pre-built Docker image (recommended) or via pip after preparing a CANN environment manually.
+
+## Prerequisites
+
+Before you install, verify that your environment meets these requirements:
+
+- **OS**: Linux
+- **Python**: 3.10 – 3.11
+- **Hardware**: Ascend NPU (Atlas A2, A3, or 300I series)
+
+| Software | Required version | Notes |
+|---|---|---|
+| CANN | 8.5.1 | Install via the Ascend toolkit or use the prebuilt CANN image |
+| PyTorch | 2.9.0 | Must match `torch-npu` exactly |
+| torch-npu | 2.9.0 | Installed automatically via pip |
+| NNAL | 8.5.1 | Required for `libatb.so`; included in prebuilt images |
+
+## Docker image variants
+
+Pre-built images are available on [quay.io/ascend/vllm-ascend](https://quay.io/repository/ascend/vllm-ascend?tab=tags). Choose the image that matches your hardware and OS:
+
+| Image tag | Hardware | OS |
+|---|---|---|
+| `vllm-ascend:<version>` | Atlas A2 | Ubuntu |
+| `vllm-ascend:<version>-openeuler` | Atlas A2 | openEuler |
+| `vllm-ascend:<version>-a3` | Atlas A3 | Ubuntu |
+| `vllm-ascend:<version>-a3-openeuler` | Atlas A3 | openEuler |
+| `vllm-ascend:<version>-310p` | Atlas 300I | Ubuntu |
+| `vllm-ascend:<version>-310p-openeuler` | Atlas 300I | openEuler |
+
+## Install using Docker
+
+Using the pre-built image is the fastest way to get started. The image bundles CANN, NNAL, vLLM, and `vllm-ascend` — no manual environment setup is required.
+
+<Steps>
+  <Step title="Pull the image">
+    Choose the image for your hardware and OS combination. For Atlas A2 on Ubuntu:
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0
+    ```
+
+    <Tip>
+      If you are in China and need to accelerate the download, you can pull from a mirror:
+
+      ```bash
+      docker pull m.daocloud.io/quay.io/ascend/vllm-ascend:v0.13.0
+      # or
+      docker pull quay.nju.edu.cn/ascend/vllm-ascend:v0.13.0
+      ```
+    </Tip>
+  </Step>
+
+  <Step title="Run the container">
+    Mount the required Ascend device files and driver paths into the container. Update `--device` to match the NPU devices available on your system (A2 uses `/dev/davinci[0-7]`; A3 uses `/dev/davinci[0-15]`).
+
+    ```bash
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
+
+    The default working directory inside the container is `/workspace`. vLLM and vLLM Ascend source code are in `/vllm-workspace` and installed in development mode (`pip install -e`).
+  </Step>
+</Steps>
+
+## Install using pip
+
+Use pip if you prefer to manage your own environment or need a bare-metal install.
+
+<Steps>
+  <Step title="Verify the NPU driver">
+    Confirm that the Ascend NPU firmware and driver are installed and visible:
+
+    ```bash
+    npu-smi info
+    ```
+
+    If `npu-smi` is not found, follow the [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) to install the firmware and driver first.
+  </Step>
+
+  <Step title="Set up the CANN environment">
+    The easiest approach is to use the prebuilt CANN Docker image as your base environment. If you prefer a manual install, expand the section below.
+
+    <Tabs>
+      <Tab title="Use CANN image (recommended)">
+        Run the CANN prebuilt container to get a ready-to-use environment including NNAL:
+
+        ```bash
+        export DEVICE=/dev/davinci7   # update to match your device
+        export IMAGE=quay.io/ascend/cann:8.5.1-ubuntu22.04
+
+        docker run --rm \
+            --name vllm-ascend-env \
+            --shm-size=1g \
+            --device $DEVICE \
+            --device /dev/davinci_manager \
+            --device /dev/devmm_svm \
+            --device /dev/hisi_hdc \
+            -v /usr/local/dcmi:/usr/local/dcmi \
+            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+            -v /etc/ascend_install.info:/etc/ascend_install.info \
+            -v /root/.cache:/root/.cache \
+            -it $IMAGE bash
+        ```
+      </Tab>
+      <Tab title="Install CANN manually">
+        <Warning>
+          If you see a `libatb.so not found` error at runtime, NNAL is missing. Make sure you complete all steps below, including the NNAL package.
+        </Warning>
+
+        ```bash
+        # Create and activate a virtual environment
+        python -m venv vllm-ascend-env
+        source vllm-ascend-env/bin/activate
+
+        # Install Python dependencies
+        pip3 install attrs 'numpy<2.0.0' decorator sympy cffi pyyaml \
+            pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
+
+        # Download and install the CANN toolkit
+        wget --header="Referer: https://www.hiascend.com/" \
+            https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run
+        chmod +x ./Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run
+        ./Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run --full
+        source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
+        # Install 910B ops package
+        wget --header="Referer: https://www.hiascend.com/" \
+            https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run
+        chmod +x ./Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run
+        ./Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run --install
+
+        # Install NNAL (required for libatb.so)
+        wget --header="Referer: https://www.hiascend.com/" \
+            https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run
+        chmod +x ./Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run
+        ./Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run --install
+        source /usr/local/Ascend/nnal/atb/set_env.sh
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Install system dependencies">
+    ```bash
+    # Ubuntu / Debian
+    apt-get update -y && apt-get install -y gcc g++ cmake libnuma-dev wget git curl jq
+
+    # RHEL / openEuler
+    # yum update -y && yum install -y gcc g++ cmake numactl-devel wget git curl jq
+    ```
+  </Step>
+
+  <Step title="Install vLLM and vllm-ascend">
+    Install both packages from pre-built wheels. The versions must match.
+
+    <CodeGroup>
+
+    ```bash Standard pip
+    # Install vLLM
+    pip install vllm==0.13.0
+
+    # Install vllm-ascend
+    pip install \
+      --extra-index-url https://mirrors.huaweicloud.com/repository/pypi/simple \
+      vllm-ascend==0.13.0
+    ```
+
+    ```bash uv-wheelnext (smaller download)
+    # Install uv-wheelnext for incremental wheel support
+    curl -LsSf https://astral.sh/uv/install.sh \
+      | sed 's/verify_checksum "$_file"/true/' \
+      | INSTALLER_DOWNLOAD_URL=https://wheelnext.astral.sh sh
+    source $HOME/.local/bin/env
+
+    # Install vLLM
+    pip install vllm==0.13.0
+
+    # Install vllm-ascend from the wheelnext index
+    uv pip install --system -v \
+      --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant \
+      vllm-ascend==0.13.0
+    ```
+
+    </CodeGroup>
+  </Step>
+</Steps>
+
+## Build from source
+
+Use this approach if you need to modify the source code or target a specific commit.
+
+```bash
+# Clone and install vLLM (empty device target — no GPU/NPU needed at build time)
+git clone --depth 1 --branch v0.13.0 https://github.com/vllm-project/vllm
+cd vllm
+VLLM_TARGET_DEVICE=empty pip install -v -e .
+cd ..
+
+# Clone and install vllm-ascend
+git clone --depth 1 --branch releases/v0.13.0 https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+git submodule update --init --recursive
+pip install -v -e .
+cd ..
+```
+
+<Note>
+  When building in a CPU-only environment without `npu-smi`, set `SOC_VERSION` before running `pip install -e .` so the build targets the correct chip:
+
+  - Atlas A2: `export SOC_VERSION=ascend910b1`
+  - Atlas A3: `export SOC_VERSION=ascend910_9391`
+  - Atlas 300I: `export SOC_VERSION=ascend310p1`
+
+  If you encounter torch-npu version conflicts, use `pip install --no-build-isolation -e .` to build against your system environment.
+</Note>
+
+## Verify installation
+
+After installation, run a short inference script to confirm everything is working:
+
+```python
+from vllm import LLM, SamplingParams
+
+prompts = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
+
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+llm = LLM(model="Qwen/Qwen3-0.6B")
+
+outputs = llm.generate(prompts, sampling_params)
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+```
+
+Save the file as `example.py` and run it:
+
+```bash
+python example.py
+```
+
+Look for this line in the logs to confirm the plugin loaded correctly:
+
+```shell
+INFO Platform plugin ascend is activated
+```
+
+<Tip>
+  If you see a Hugging Face connectivity error, use ModelScope as a mirror:
+
+  ```bash
+  export VLLM_USE_MODELSCOPE=True
+  pip install modelscope
+  python example.py
+  ```
+</Tip>
+
+## Multi-node deployment
+
+### Verify multi-node communication
+
+Before running distributed workloads across nodes, confirm that all NPUs can reach each other over the network.
+
+**Physical requirements:**
+- All machines must be on the same WLAN.
+- NPUs must be connected via optical modules with normal connection status.
+
+Run the following checks on each node. All results must report `success` and link status must be `UP`:
+
+<Tabs>
+  <Tab title="A2 series">
+    ```bash
+    # Check remote switch ports
+    for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
+
+    # Check Ethernet link status (must be UP)
+    for i in {0..7}; do hccn_tool -i $i -link -g; done
+
+    # Check network health
+    for i in {0..7}; do hccn_tool -i $i -net_health -g; done
+
+    # View detected IP configuration
+    for i in {0..7}; do hccn_tool -i $i -netdetect -g; done
+
+    # View gateway configuration
+    for i in {0..7}; do hccn_tool -i $i -gateway -g; done
+
+    # View NPU network configuration
+    cat /etc/hccn.conf
+    ```
+  </Tab>
+  <Tab title="A3 series">
+    ```bash
+    # Check remote switch ports
+    for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done
+
+    # Check Ethernet link status (must be UP)
+    for i in {0..15}; do hccn_tool -i $i -link -g; done
+
+    # Check network health
+    for i in {0..15}; do hccn_tool -i $i -net_health -g; done
+
+    # View detected IP configuration
+    for i in {0..15}; do hccn_tool -i $i -netdetect -g; done
+
+    # View gateway configuration
+    for i in {0..15}; do hccn_tool -i $i -gateway -g; done
+
+    # View NPU network configuration
+    cat /etc/hccn.conf
+    ```
+  </Tab>
+</Tabs>
+
+### Cross-node connectivity test
+
+Get the IP address of each NPU on both nodes, then run a ping test between them:
+
+<Tabs>
+  <Tab title="A2 series">
+    ```bash
+    # Get NPU IP addresses
+    for i in {0..7}; do hccn_tool -i $i -ip -g | grep ipaddr; done
+    ```
+  </Tab>
+  <Tab title="A3 series">
+    ```bash
+    # Get NPU IP addresses
+    for i in {0..15}; do hccn_tool -i $i -ip -g | grep ipaddr; done
+    ```
+  </Tab>
+</Tabs>
+
+Then ping from one node to the other (replace `x.x.x.x` with the target NPU's IP):
+
+```bash
+hccn_tool -i 0 -ping -g address x.x.x.x
+```
+
+### Run the container on each node
+
+Start the vLLM Ascend container on every node in your cluster. Download model weights to `/root/.cache` before running.
+
+<Tabs>
+  <Tab title="A2 series">
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0
+
+    docker run --rm \
+      --name vllm-ascend \
+      --net=host \
+      --shm-size=1g \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci_manager \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /root/.cache:/root/.cache \
+      -it $IMAGE bash
+    ```
+  </Tab>
+  <Tab title="A3 series">
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0-a3
+
+    docker run --rm \
+      --name vllm-ascend \
+      --net=host \
+      --shm-size=1g \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci8 \
+      --device /dev/davinci9 \
+      --device /dev/davinci10 \
+      --device /dev/davinci11 \
+      --device /dev/davinci12 \
+      --device /dev/davinci13 \
+      --device /dev/davinci14 \
+      --device /dev/davinci15 \
+      --device /dev/davinci_manager \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /root/.cache:/root/.cache \
+      -it $IMAGE bash
+    ```
+  </Tab>
+</Tabs>

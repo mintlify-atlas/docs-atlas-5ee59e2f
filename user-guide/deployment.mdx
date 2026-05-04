@@ -1,0 +1,233 @@
+---
+title: "Deploying vLLM Ascend in production environments"
+description: "Step-by-step guide for single-node Docker, multi-node tensor parallel, and Kubernetes deployments of vLLM Ascend on Ascend NPU hardware."
+---
+
+vLLM Ascend supports several deployment topologies, from single-NPU development setups to multi-node Kubernetes clusters with prefill-decode disaggregation. This guide walks you through the most common patterns.
+
+## Single-node deployment
+
+The fastest way to get started is with Docker. Pull the official vLLM Ascend image and run the server directly.
+
+<Steps>
+  <Step title="Pull the image">
+    ```bash
+    docker pull quay.io/ascend/vllm-ascend:latest
+    ```
+  </Step>
+  <Step title="Start the server">
+    Run the container with NPU device access and mount your model cache:
+
+    ```bash
+    docker run --rm \
+      --device=/dev/davinci0 \
+      --device=/dev/davinci_manager \
+      --device=/dev/devmm_svm \
+      --device=/dev/hisi_hdc \
+      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+      -v /path/to/models:/models \
+      -p 8000:8000 \
+      quay.io/ascend/vllm-ascend:latest \
+      vllm serve /models/Qwen3-8B --host 0.0.0.0 --port 8000
+    ```
+  </Step>
+  <Step title="Verify the server">
+    ```bash
+    curl http://localhost:8000/v1/models
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+Pass `--gpu-memory-utilization 0.9` to increase the KV cache budget, or `--max-model-len` to cap context length and reduce memory usage.
+</Tip>
+
+## Multi-node deployment
+
+For large models that require more NPUs than a single node provides, use `vllm serve` with tensor parallelism across nodes.
+
+### Verify network connectivity
+
+Before launching a multi-node job, confirm that HCCL can reach all nodes:
+
+```bash
+# On each node, check HCCL interface configuration
+hccn_tool -i 0 -link -g
+hccn_tool -i 0 -ip -g
+```
+
+Ensure all nodes can reach each other on the HCCL port (default `7090`). Set `HCCL_SOCKET_IFNAME` to the correct network interface name if auto-detection fails.
+
+### Launch on each node
+
+Use `ray` or `torchrun` to coordinate the distributed job. With Ray:
+
+<Steps>
+  <Step title="Start the Ray head node">
+    ```bash
+    ray start --head --port=6379
+    ```
+  </Step>
+  <Step title="Join worker nodes">
+    ```bash
+    # Run on each additional node
+    ray start --address='<head-node-ip>:6379'
+    ```
+  </Step>
+  <Step title="Launch the vLLM server">
+    ```bash
+    vllm serve deepseek-ai/DeepSeek-V3 \
+      --tensor-parallel-size 16 \
+      --pipeline-parallel-size 2 \
+      --host 0.0.0.0 \
+      --port 8000
+    ```
+  </Step>
+</Steps>
+
+### Common parallelism options
+
+| Flag | Description |
+|------|-------------|
+| `--tensor-parallel-size N` | Split model weights across N NPUs (within a node or across nodes) |
+| `--pipeline-parallel-size N` | Split model layers across N pipeline stages |
+| `--data-parallel-size N` | Run N independent model replicas for higher throughput |
+
+<Note>
+Expert parallelism for MoE models is configured via `additional_config`. Set `eplb_config.dynamic_eplb` to `true` to enable dynamic load balancing across experts.
+</Note>
+
+## Kubernetes deployment with Volcano Kthena
+
+[Kthena](https://kthena.volcano.sh/) is a Kubernetes-native LLM inference platform that manages prefill-decode (PD) disaggregation declaratively. It uses three Custom Resource Definitions (CRDs): `ModelServing`, `ModelServer`, and `ModelRoute`.
+
+### Prerequisites
+
+- Kubernetes cluster with Ascend NPU nodes and the appropriate device plugin:
+  - **MindCluster**: use resource `huawei.com/Ascend910` or `huawei.com/Ascend310P`
+  - **CCE (Huawei Cloud)**: use resource `huawei.com/ascend-310` or `huawei.com/ascend-1980`
+- Kthena installed — see the [Kthena installation guide](https://kthena.volcano.sh/docs/getting-started/installation)
+
+### Deploy a PD-disaggregated model
+
+<Steps>
+  <Step title="Create the ModelServing resource">
+    The `ModelServing` resource defines prefill and decode workloads as separate roles. Apply the example manifest for DeepSeek-V2-Lite:
+
+    ```bash
+    kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/main/examples/model-serving/prefill-decode-disaggregation.yaml
+    ```
+
+    Or provide your own inline manifest. The key fields per role are the vLLM args and the `--kv-transfer-config` that assigns each role as `kv_producer` (prefill) or `kv_consumer` (decode):
+
+    ```yaml
+    args:
+      - "--kv-transfer-config"
+      - '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer",...}'
+    ```
+  </Step>
+  <Step title="Create the ModelServer resource">
+    The `ModelServer` pairs prefill and decode pods into PD groups and configures internal routing:
+
+    ```bash
+    kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/main/examples/kthena-router/ModelServer-prefill-decode-disaggregation.yaml
+    ```
+
+    Or apply inline:
+
+    ```bash
+    cat << 'EOF' | kubectl apply -f -
+    apiVersion: networking.serving.volcano.sh/v1alpha1
+    kind: ModelServer
+    metadata:
+      name: deepseek-v2
+      namespace: dev
+    spec:
+      kvConnector:
+        type: nixl
+      workloadSelector:
+        matchLabels:
+          modelserving.volcano.sh/name: deepseek-v2-lite
+        pdGroup:
+          groupKey: "modelserving.volcano.sh/group-name"
+          prefillLabels:
+            modelserving.volcano.sh/role: prefill
+          decodeLabels:
+            modelserving.volcano.sh/role: decode
+      workloadPort:
+        port: 8000
+      model: "deepseek-ai/DeepSeekV2"
+      inferenceEngine: "vLLM"
+      trafficPolicy:
+        timeout: 10s
+    EOF
+    ```
+  </Step>
+  <Step title="Create the ModelRoute resource">
+    The `ModelRoute` exposes a stable endpoint that the Kthena router fronts:
+
+    ```bash
+    cat << 'EOF' | kubectl apply -f -
+    apiVersion: networking.serving.volcano.sh/v1alpha1
+    kind: ModelRoute
+    metadata:
+      name: deepseek-v2
+      namespace: dev
+    spec:
+      modelName: "deepseek-ai/DeepSeekV2"
+      rules:
+        - name: "default"
+          targetModels:
+            - modelServerName: "deepseek-v2"
+    EOF
+    ```
+  </Step>
+  <Step title="Verify the deployment">
+    Check that both prefill and decode pods are running:
+
+    ```bash
+    kubectl get pod -n dev -owide \
+      -l modelserving.volcano.sh/name=deepseek-v2-lite
+    ```
+
+    Then send a test request through the Kthena router:
+
+    ```bash
+    export ENDPOINT=$(kubectl get svc kthena-router -n kthena-system \
+      --output=jsonpath='{.status.loadBalancer.ingress[0].ip}:{.spec.ports[0].port}')
+
+    curl "http://${ENDPOINT}/v1/chat/completions" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "deepseek-ai/DeepSeekV2",
+        "messages": [{"role": "user", "content": "Hello!"}],
+        "stream": false
+      }'
+    ```
+  </Step>
+</Steps>
+
+### Cleaning up
+
+```bash
+kubectl delete modelroute deepseek-v2 -n dev
+kubectl delete modelserver deepseek-v2 -n dev
+kubectl delete modelserving deepseek-v2-lite -n dev
+```
+
+## Production tips
+
+<CardGroup cols={2}>
+  <Card title="Tune memory utilization" icon="memory">
+    Set `--gpu-memory-utilization` (0.0–1.0) to control how much NPU HBM is reserved for the KV cache. Start at `0.9` and lower if you see out-of-memory errors during graph capture.
+  </Card>
+  <Card title="Enable graph mode" icon="diagram-project">
+    Graph mode (AclGraph) dramatically reduces per-token compute overhead. It is enabled by default. Use `ascend_compilation_config.enable_npugraph_ex` in `additional_config` for fine-grained control.
+  </Card>
+  <Card title="Use async scheduling" icon="clock">
+    Pass `--scheduling-policy priority` or configure async scheduling to overlap scheduling with NPU execution, reducing idle bubbles especially in pipeline parallel setups.
+  </Card>
+  <Card title="Monitor with metrics" icon="chart-line">
+    vLLM Ascend exposes Prometheus-compatible metrics at `/metrics`. Scrape this endpoint from your monitoring stack to track throughput, latency, and NPU utilization.
+  </Card>
+</CardGroup>

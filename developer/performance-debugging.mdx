@@ -1,0 +1,304 @@
+---
+title: "Performance optimization and debugging on Ascend"
+description: "Benchmark vLLM Ascend workloads, apply NPU-specific tuning, profile service behavior, and diagnose OOM errors and accuracy issues."
+---
+
+Ascend NPUs have different performance characteristics from GPUs—CPU-NPU synchronization costs, stream budgets, and memory allocation behavior all affect throughput and latency. This guide covers the tools and techniques you need to measure, optimize, and debug vLLM Ascend workloads.
+
+## Performance benchmarking
+
+vLLM Ascend uses the benchmark suite from the upstream vLLM project, supplemented by Ascend-specific scripts in the `benchmarks/` directory of this repository.
+
+### Key metrics
+
+| Metric | Description |
+|---|---|
+| **Throughput (tokens/s)** | Total output tokens generated per second across all requests |
+| **Latency (ms)** | End-to-end time from request submission to final token |
+| **TTFT (ms)** | Time to first token — how long until the first output token arrives |
+| **TPOT (ms)** | Time per output token — average inter-token latency after the first token |
+
+### Running benchmarks
+
+Install benchmark dependencies:
+
+```bash
+cd /workspace/vllm-ascend
+pip install -r benchmarks/requirements-bench.txt
+```
+
+<Tabs>
+  <Tab title="Online serving">
+    Start the vLLM server, then run the serving benchmark:
+
+    ```bash
+    export VLLM_USE_MODELSCOPE=True
+    vllm serve Qwen/Qwen3-8B
+    ```
+
+    ```bash
+    vllm bench serve \
+      --backend vllm \
+      --model Qwen/Qwen3-8B \
+      --endpoint /v1/completions \
+      --dataset-name sharegpt \
+      --dataset-path /path/to/ShareGPT_V3_unfiltered_cleaned_split.json \
+      --num-prompts 100
+    ```
+
+    The output reports TTFT, TPOT, inter-token latency, and throughput.
+  </Tab>
+  <Tab title="Offline throughput">
+    Measure throughput without a server:
+
+    ```bash
+    export VLLM_USE_MODELSCOPE=True
+    vllm bench throughput \
+      --model Qwen/Qwen3-8B \
+      --dataset-name random \
+      --input-len 128 \
+      --output-len 128
+    ```
+  </Tab>
+</Tabs>
+
+## Optimization tips
+
+### Avoid tensor.item() in hot paths
+
+Calling `tensor.item()` on a device tensor forces a synchronous NPU-to-CPU data transfer. In a hot loop this blocks the `AsyncScheduler` and can dominate latency.
+
+```python
+# Bad: one sync per iteration
+for tensor in tensors:
+    value = tensor.item()
+
+# Better: batch all item() calls into a single sync
+values = [t.item() for t in tensors]
+
+# Best: stay on device when possible
+max_value = torch.max(tensor)   # no sync needed
+if max_value > threshold:       # comparison stays on device
+    ...
+```
+
+If `item()` is unavoidable (for example, in logging or conditional branching), document why in a comment.
+
+### Tensor-parallel communication
+
+<CardGroup cols={2}>
+  <Card title="MatMul all-reduce fusion" icon="merge">
+    Set `VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE=1` to fuse the all-reduce collective into the matmul kernel, reducing communication overhead for tensor-parallel inference.
+  </Card>
+  <Card title="FlashComm overlap" icon="zap">
+    `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` and `VLLM_ASCEND_ENABLE_FLASHCOMM2=1` enable pipelined communication that overlaps computation and collective operations, improving utilization on multi-card setups.
+  </Card>
+</CardGroup>
+
+### HCCL tuning
+
+Enable AIV mode to schedule communication directly via AI vector cores over RoCE instead of AI CPU:
+
+```bash
+export HCCL_OP_EXPANSION_MODE=AIV
+```
+
+AIV mode also increases the number of valid ACL Graph capture sizes, which improves graph replay coverage.
+
+### ACL Graph mode
+
+Enable ACL Graph mode for production deployments. It captures the computation graph for repeated batch shapes and replays with significantly lower host-launch overhead:
+
+```bash
+# Graph mode is enabled by default. To confirm it is active, keep log stats on:
+vllm serve <model> --cudagraph-metrics
+```
+
+Piecewise graph mode is the default. Full graph mode offers better performance when the attention backend supports `update_graph_params()` hooks.
+
+### GPU memory utilization
+
+Tune `--gpu-memory-utilization` to control how much NPU HBM vLLM reserves for KV cache. Higher values increase cache capacity and throughput but leave less headroom for model weights and activations:
+
+```bash
+vllm serve <model> --gpu-memory-utilization 0.92
+```
+
+### Memory allocator
+
+Use `expandable_segments` to allow the NPU allocator to reuse memory across streams more aggressively:
+
+```bash
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+```
+
+For multi-threaded scenarios, consider `jemalloc` or `tcmalloc` to reduce CPU-side memory fragmentation:
+
+```bash
+# jemalloc
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+```
+
+### OS-level tuning
+
+Apply these settings on the host OS (not inside containers) for stable latency:
+
+```bash
+# Fix CPU frequency at maximum
+echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+
+# Minimize swap usage
+sysctl -w vm.swappiness=0
+
+# Disable NUMA auto-balancing (for multi-socket servers)
+sysctl -w kernel.numa_balancing=0
+
+# Reduce thread migration
+sysctl -w kernel.sched_migration_cost_ns=50000
+```
+
+## Profiling
+
+### Ascend PyTorch Profiler
+
+The Ascend PyTorch Profiler collects operator-level performance data. Start the server with `--profiler-config` to enable it:
+
+```bash
+python3 -m vllm.entrypoints.openai.api_server \
+  --port 8080 \
+  --model "Qwen/Qwen2.5-0.5B-Instruct" \
+  --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}'
+```
+
+Control collection with HTTP requests:
+
+```bash
+curl -X POST http://localhost:8080/start_profile
+# ... send inference requests ...
+curl -X POST http://localhost:8080/stop_profile
+```
+
+Analyze the captured data:
+
+```python
+from torch_npu.profiler.profiler import analyse
+analyse("./vllm_profile/localhost.localdomain_*_ascend_pt/")
+```
+
+The `ASCEND_PROFILER_OUTPUT/trace_view.json` file can be opened in MindStudio Insight for visual inspection.
+
+### MS Service Profiler
+
+MS Service Profiler operates at the service framework level, capturing scheduling, KV cache, and batch information rather than individual operators.
+
+<Steps>
+  <Step title="Build from source">
+    ```bash
+    git clone https://gitcode.com/Ascend/msserviceprofiler.git
+    cd msserviceprofiler
+    bash scripts/build_and_upgrade.sh
+    ```
+  </Step>
+  <Step title="Configure and start the service">
+    ```bash
+    export SERVICE_PROF_CONFIG_PATH=ms_service_profiler_config.json
+    vllm serve Qwen/Qwen2.5-0.5B-Instruct &
+    ```
+
+    A default `ms_service_profiler_config.json` is generated automatically if it does not exist.
+  </Step>
+  <Step title="Enable profiling">
+    ```bash
+    sed -i 's/"enable":\s*0/"enable": 1/' ./ms_service_profiler_config.json
+    ```
+  </Step>
+  <Step title="Send requests and parse results">
+    Send inference requests, then parse the dump:
+
+    ```bash
+    cd /root/.ms_server_profiler/xxxx-xxxx
+    msserviceprofiler parse --input-path=./ --output-path output
+    ```
+
+    The `output/` directory contains `chrome_tracing.json` (viewable in MindStudio Insight), `request.csv`, `kvcache.csv`, and `batch.csv`.
+  </Step>
+</Steps>
+
+### Accuracy debugging with msprobe
+
+Use `msprobe` to capture intermediate tensors and diagnose numerical issues (NaN/Inf, output drift):
+
+```bash
+pip install mindstudio-probe==8.3.0
+```
+
+Start vLLM in eager mode and pass the dump config path:
+
+```bash
+vllm serve Qwen/Qwen2.5-0.5B-Instruct \
+  --dtype float16 \
+  --enforce-eager \
+  --additional-config '{"dump_config_path": "/data/msprobe_config.json"}'
+```
+
+A minimal `msprobe_config.json`:
+
+```json
+{
+  "task": "statistics",
+  "dump_path": "/home/data_dump",
+  "rank": [],
+  "step": [],
+  "level": "L1",
+  "async_dump": false,
+  "statistics": {
+    "scope": [],
+    "list": []
+  }
+}
+```
+
+Compare dumps from a problem run against a baseline to identify which layer first diverges.
+
+## Debugging OOM issues
+
+<AccordionGroup>
+  <Accordion title="Reduce maximum sequence length">
+    Shorter sequences require less KV cache space. Lower `--max-model-len` to reduce peak memory:
+
+    ```bash
+    vllm serve <model> --max-model-len 4096
+    ```
+  </Accordion>
+  <Accordion title="Adjust GPU memory utilization">
+    Reduce the HBM fraction reserved for KV cache to leave more room for model weights:
+
+    ```bash
+    vllm serve <model> --gpu-memory-utilization 0.85
+    ```
+  </Accordion>
+  <Accordion title="Enable expandable segments">
+    Allow the allocator to reuse memory across streams more aggressively, which can reduce fragmentation-driven OOM:
+
+    ```bash
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    ```
+  </Accordion>
+  <Accordion title="Limit maximum batch size">
+    Reduce `--max-num-seqs` and `--max-num-batched-tokens` to lower the peak memory footprint per iteration:
+
+    ```bash
+    vllm serve <model> --max-num-seqs 64 --max-num-batched-tokens 8192
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Common errors and solutions
+
+| Error | Likely cause | Solution |
+|---|---|---|
+| `ASCEND_LAUNCH_BLOCKING=1` with graph mode | ACL Graph is incompatible with blocking mode | Unset `ASCEND_LAUNCH_BLOCKING` or disable graph mode |
+| `RuntimeError: Please enforce eager mode` (msprobe) | msprobe does not support static graph capture | Add `--enforce-eager` when using msprobe |
+| Accuracy degradation after graph capture | Attention parameters not refreshed before replay | Ensure the attention backend implements `update_graph_params()` |
+| OOM during warmup | KV cache allocation too large for model size | Reduce `--gpu-memory-utilization` or `--max-model-len` |
+| Slow throughput with TP | Communication overhead dominates | Enable `HCCL_OP_EXPANSION_MODE=AIV` and `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` |

@@ -1,0 +1,335 @@
+---
+title: "Frequently asked questions about vLLM Ascend Plugin"
+description: "Answers to common questions about device support, models, installation, performance, quantization, troubleshooting, and using vLLM Ascend on Ascend NPUs."
+---
+
+This page answers the most frequently asked questions about vLLM Ascend Plugin. If you cannot find an answer here, you can ask in the [user forum](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support), the **#SIG-Ascend** channel on [Slack](https://slack.vllm.ai), or [open a GitHub issue](https://github.com/vllm-project/vllm-ascend/issues).
+
+## Installation
+
+<AccordionGroup>
+  <Accordion title="What devices are currently supported?">
+    The following Ascend NPU series are supported:
+
+    - **Atlas A2 Training series:** Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 Box16, Atlas 300T A2
+    - **Atlas 800I A2 Inference series:** Atlas 800I A2
+    - **Atlas A3 Training series:** Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD
+    - **Atlas 800I A3 Inference series:** Atlas 800I A3
+    - **[Experimental] Atlas 300I Inference series:** Atlas 300I Duo — the stable version is `v0.10.0rc1`
+
+    The following series are **not supported**:
+    - Atlas 200I A2 (unplanned)
+    - Ascend 910, Ascend 910 Pro B (unplanned)
+
+    From a technical standpoint, vllm-ascend supports devices where torch-npu is supported. For unsupported hardware, custom operators are required. Contributions are welcome.
+  </Accordion>
+  <Accordion title="How do I get the Docker containers?">
+    Official containers are available on **Quay.io**:
+    - [vllm-ascend image](https://quay.io/repository/ascend/vllm-ascend?tab=tags)
+    - [CANN image](https://quay.io/repository/ascend/cann?tab=tags)
+
+    If you are in China, use a mirror to accelerate the download:
+
+    ```bash
+    # Replace with the tag you want to pull
+    TAG=v0.9.1
+    docker pull m.daocloud.io/quay.io/ascend/vllm-ascend:$TAG
+    # or
+    docker pull quay.nju.edu.cn/ascend/vllm-ascend:$TAG
+    ```
+
+    **Offline environments:** To use the container without internet access, export the image on a connected machine and transfer the archive:
+
+    ```bash
+    # On a machine with internet access
+    TAG=v0.13.0
+    docker pull quay.io/ascend/vllm-ascend:$TAG
+    docker save quay.io/ascend/vllm-ascend:$TAG | gzip > vllm-ascend-$TAG.tar.gz
+    ```
+
+    ```bash
+    # On the offline machine
+    docker load -i vllm-ascend-$TAG.tar.gz
+    docker images | grep vllm-ascend
+    ```
+  </Accordion>
+  <Accordion title="How do I set SOC_VERSION when building from source on a CPU-only machine?">
+    When building from source (for example, `pip install -e .`), the build tries to detect the target chip using `npu-smi`. If `npu-smi` is not available — common in CPU-only build environments — set `SOC_VERSION` manually before installation:
+
+    ```bash
+    # Atlas A2
+    export SOC_VERSION="ascend910b1"
+
+    # Atlas A3
+    export SOC_VERSION="ascend910_9391"
+
+    # Atlas 300I
+    export SOC_VERSION="ascend310p1"
+
+    # Atlas A5 (Ascend 950 series)
+    export SOC_VERSION="<value starting with ascend950>"
+    ```
+
+    Use the defaults from the project's `Dockerfile*` as a reference.
+  </Accordion>
+  <Accordion title="How do I install a custom version of torch_npu?">
+    torch-npu is overridden when you install vllm-ascend. To pin a specific version of torch-npu, install it manually after vllm-ascend is installed:
+
+    ```bash
+    pip install torch-npu==<your-version>
+    ```
+  </Accordion>
+  <Accordion title="How do I fix a 'Failed to reinstall vllm-ascend from source' error?">
+    If you encounter C/C++ compilation failures when reinstalling vllm-ascend from source after uninstalling, try one of the following:
+
+    ```bash
+    # Recommended: use setup.py install
+    python setup.py install
+
+    # Or clear the build cache first
+    python setup.py clean
+    pip install -e .
+    ```
+  </Accordion>
+  <Accordion title="How do I fix the 'docker pull invalid tar header' error on Kylin OS?">
+    On certain operating systems such as Kylin OS, `docker pull` may fail with:
+
+    ```text
+    failed to register layer: ApplyLayer exit status 1 stdout: stderr: archive/tar: invalid tar header
+    ```
+
+    This is a system compatibility issue. Resolve it by using the offline loading method:
+
+    1. On a separate Ubuntu host, pull the image for the ARM64 architecture and save it:
+
+       ```bash
+       export IMAGE_TAG=v0.10.0rc1-310p
+       export IMAGE_NAME="quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
+       docker pull --platform linux/arm64 "${IMAGE_NAME}"
+       docker save -o "vllm_ascend_${IMAGE_TAG}.tar" "${IMAGE_NAME}"
+       ```
+
+    2. Transfer the `.tar` file to your target machine, then load it:
+
+       ```bash
+       docker load -i vllm_ascend_${IMAGE_TAG}.tar
+       ```
+  </Accordion>
+  <Accordion title="Why do I get an 'operation not permitted' error when starting a Docker container?">
+    When using `--shm-size`, you may need to add `--privileged=true` to your `docker run` command:
+
+    ```bash
+    docker run --privileged=true --shm-size=1g ...
+    ```
+
+    <Warning>
+      The `--privileged=true` flag grants the container extensive privileges on the host system and can be a security risk. Only use it if you trust the container's source and understand the implications.
+    </Warning>
+  </Accordion>
+</AccordionGroup>
+
+## Models and features
+
+<AccordionGroup>
+  <Accordion title="What models does vllm-ascend support?">
+    vllm-ascend supports a wide range of models including Transformer-based, Mixture-of-Experts (MoE), Embedding, and Multi-modal LLMs. See the [supported models page](/user-guide/supported-models) for the full compatibility matrix.
+  </Accordion>
+  <Accordion title="What features does vllm-ascend V1 support?">
+    See the [supported features page](/user-guide/supported-features) for a complete breakdown of V1 feature support.
+  </Accordion>
+  <Accordion title="Does vllm-ascend support Prefill Disaggregation?">
+    Yes. vllm-ascend supports Prefill Disaggregation with the Mooncake backend. See the [official tutorial](/features/pd-disaggregation) for a multi-node setup example.
+  </Accordion>
+  <Accordion title="Does vllm-ascend support quantization?">
+    Yes. The following quantization methods are supported:
+
+    - W8A8
+    - W4A8
+    - W4A4
+  </Accordion>
+  <Accordion title="How does vllm-ascend work with vLLM?">
+    vllm-ascend is a hardware plugin for vLLM that implements the [hardware-pluggable interface](https://github.com/vllm-project/vllm/issues/11162). Stable releases align with the same vLLM version — for example, `vllm-ascend v0.13.0` matches vLLM `v0.13.0`. For the `main` branch, vllm-ascend and vLLM are kept compatible at every commit.
+  </Accordion>
+  <Accordion title="How is vllm-ascend tested?">
+    vllm-ascend is tested across three dimensions:
+
+    - **Functional tests:** CI includes a subset of vLLM's native unit tests and vllm-ascend's own unit tests, covering basic functionality, popular model availability, and supported features through end-to-end tests.
+    - **Performance tests:** The [benchmarks](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks) directory contains E2E performance benchmark tools that you can run locally.
+    - **Accuracy tests:** Accuracy testing is being added to CI.
+    - **Nightly tests:** The full test suite runs every night to catch regressions.
+  </Accordion>
+  <Accordion title="How do I fix the ImportError for multi-modal models?">
+    Some multi-modal models (such as Qwen-Omni) require the `librosa` package. Install the `qwen-omni-utils` package to resolve this:
+
+    ```bash
+    pip install qwen-omni-utils
+    ```
+
+    This installs `librosa` and its dependencies, resolving the `ImportError: No module named 'librosa'` error.
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="How do I fix 'Failed to infer device type' or 'libatb.so: cannot open shared object file'?">
+    These errors mean the NPU environment is not configured correctly. Try the following steps in order:
+
+    ```bash
+    # Enable the NNAL package
+    source /usr/local/Ascend/nnal/atb/set_env.sh
+
+    # Enable the CANN package
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
+    # Verify the NPU is working
+    npu-smi info
+    ```
+
+    Then confirm the environment is functional in Python:
+
+    ```python
+    import torch
+    import torch_npu
+    import vllm
+    ```
+
+    If these steps do not resolve the issue, [open a GitHub issue](https://github.com/vllm-project/vllm-ascend/issues).
+  </Accordion>
+  <Accordion title="How do I fix the 'InvalidVersion' error?">
+    This error typically occurs when you have installed a development or editable version of vLLM, which does not have a standard version string. Set the `VLLM_VERSION` environment variable to specify your vLLM version:
+
+    ```bash
+    export VLLM_VERSION=0.13.0
+    ```
+
+    The format must be `X.Y.Z`.
+  </Accordion>
+  <Accordion title="How do I handle out-of-memory (OOM) errors?">
+    OOM errors occur when the model exceeds the memory capacity of a single NPU. You can reduce memory pressure with any of these approaches:
+
+    - **Limit `--max-model-len`** to reduce KV cache memory at initialization.
+    - **Lower `--gpu-memory-utilization`** (default is `0.9`) to reserve more memory and reduce fragmentation risk.
+    - **Enable virtual memory** to reduce fragmentation from dynamic allocation:
+
+      ```bash
+      export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+      ```
+
+    For general OOM guidance, see the [vLLM OOM troubleshooting docs](https://docs.vllm.ai/en/latest/usage/troubleshooting/#out-of-memory).
+  </Accordion>
+  <Accordion title="NPU graph mode fails for DeepSeek (MLA heads issue)">
+    Enabling NPU graph mode for DeepSeek may produce this error:
+
+    ```text
+    RuntimeError: EZ9999: numHeads / numKvHeads = 8, MLA only support {32, 64, 128}.
+    ```
+
+    When MLA (Multi-Head Latent Attention) and NPU graph mode are both active, the number of queries per KV head must be 32, 64, or 128.
+
+    - **DeepSeek-V2-Lite** has only 16 attention heads (16 queries per KV), which is outside the supported range. Support will be added in a future update.
+    - **DeepSeek-V3 or DeepSeek-R1:** After tensor parallel splitting, ensure `num_heads`/`num_kv_heads` results in one of the supported values: {32, 64, 128}.
+  </Accordion>
+  <Accordion title="Stream resource exhaustion during graph capture">
+    If you see this error during ACLgraph size capture:
+
+    ```text
+    ACLgraph has insufficient available streams to capture the configured number of sizes.
+    ```
+
+    Try one of these mitigations:
+
+    1. Reduce the set of captured sizes manually:
+
+       ```bash
+       --compilation-config '{"cudagraph_capture_sizes":[1, 2, 4, 8]}'
+       ```
+
+    2. Use ACLgraph's full graph mode instead of the piecewise approach.
+
+    **Root cause:** The stream requirement calculation accounts for data parallel size, tensor parallel size, expert parallel configuration, and piece graph count — but does not account for additional streams consumed by operator characteristics and hardware-specific features, which can exhaust available streams.
+  </Accordion>
+  <Accordion title="How do I generate deterministic results?">
+    Two factors affect output determinism:
+
+    1. **Use greedy sampling** by setting `temperature=0`:
+
+       ```python
+       from vllm import LLM, SamplingParams
+
+       llm = LLM(model="Qwen/Qwen3-0.6B")
+       sampling_params = SamplingParams(temperature=0)
+       outputs = llm.generate(["The future of AI is"], sampling_params)
+       ```
+
+    2. **Set determinism environment variables:**
+
+       ```bash
+       export LCCL_DETERMINISTIC=1
+       export HCCL_DETERMINISTIC=true
+       export ATB_MATMUL_SHUFFLE_K_ENABLE=0
+       export ATB_LLM_LCOC_ENABLE=0
+       ```
+  </Accordion>
+</AccordionGroup>
+
+## Performance
+
+<AccordionGroup>
+  <Accordion title="How do I achieve low latency in small-batch scenarios?">
+    The default `torch_npu.npu_fused_infer_attention_score` operator does not perform well in small-batch scenarios due to the absence of flash decoding. An alternative operator is available in the `tools/` directory:
+
+    ```bash
+    # For Atlas A2 machines
+    bash tools/install_flash_infer_attention_score_ops_a2.sh
+
+    # For Atlas A3 machines
+    bash tools/install_flash_infer_attention_score_ops_a3.sh
+    ```
+
+    <Warning>
+      Do not set `additional_config.pa_shape_list` when using this method — doing so will activate a different attention operator.
+    </Warning>
+
+    <Note>
+      Use the **official vllm-ascend image**. If you are not using the official image, update the `/vllm-workspace` directory reference in the script to match your setup. If you are not the root user, you need `sudo` privileges to run this script.
+    </Note>
+  </Accordion>
+  <Accordion title="Why does TPOT increase dramatically as concurrency grows?">
+    A moderate TPOT increase with concurrency is expected behavior. A dramatic increase (10–100 ms per token) is often caused by **preemption** — when KV cache fills up, vLLM evicts and later recomputes KV cache for preempted requests.
+
+    To diagnose preemption, look for these signals in your server logs:
+
+    - `GPU KV cache usage: 99.0%` — approaching 100% triggers preemption
+    - `GPU KV cache size: 66340 tokens` — your effective concurrency limit
+
+    To reduce preemption frequency, increase available KV cache:
+
+    - Increase `--gpu-memory-utilization`
+    - Decrease `--max-num-seqs` and/or `--max-num-batched-tokens`
+
+    See the [vLLM preemption docs](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption) for further guidance.
+  </Accordion>
+</AccordionGroup>
+
+## Community
+
+<AccordionGroup>
+  <Accordion title="How do I get in touch with the community?">
+    You can reach community developers and users through several channels:
+
+    - **GitHub Issues:** [github.com/vllm-project/vllm-ascend/issues](https://github.com/vllm-project/vllm-ascend/issues)
+    - **Weekly meeting:** Every Wednesday 15:00–16:00 UTC+8, [join here](https://tinyurl.com/vllm-ascend-meeting)
+    - **User forum:** [discuss.vllm.ai/c/hardware-support/vllm-ascend-support](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support)
+    - **Slack:** `#SIG-Ascend` at [slack.vllm.ai](https://slack.vllm.ai)
+    - **WeChat group:** [Join via this issue](https://github.com/vllm-project/vllm-ascend/issues/227)
+  </Accordion>
+</AccordionGroup>
+
+## Version-specific FAQs
+
+For questions specific to a particular release, see the release-specific FAQ threads:
+
+- [v0.13.0 FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6583)
+- [v0.18.0rc1 FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/7633)
+- [v0.19.1rc1 FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/8819)

@@ -1,0 +1,67 @@
+---
+title: "Supported features and vLLM Ascend capabilities"
+description: "Feature support matrix for vLLM Ascend, including parallelism strategies, quantization, graph mode, speculative decoding, and PD disaggregation."
+---
+
+vLLM Ascend aims to stay aligned with upstream vLLM feature parity on Huawei Ascend NPUs. The table below shows the current support status for each feature, along with next steps for ongoing development. The team is actively collaborating with the vLLM community to accelerate support coverage.
+
+## Feature status legend
+
+| Symbol | Meaning |
+|--------|---------|
+| 🟢 Functional | Fully operational, with ongoing optimizations |
+| 🔵 Experimental | Experimental support; interfaces may change |
+| 🚧 WIP | Under active development |
+| 🟡 Planned | Scheduled for future implementation |
+| 🔴 No plan | No plan or deprecated by upstream vLLM |
+
+## Feature support matrix
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Chunked prefill | 🟢 Functional | See vLLM optimization docs for tuning guidance |
+| Automatic prefix caching | 🟢 Functional | See [vllm-ascend#732](https://github.com/vllm-project/vllm-ascend/issues/732) for details |
+| LoRA | 🔵 Experimental | Supported including with tensor parallel and `--fully-sharded-loras` |
+| Speculative decoding | 🟢 Functional | Includes EAGLE, EAGLE3, and ngram speculative decoding |
+| Pooling (embedding/reranking) | 🔵 Experimental | V1 support depends on upstream vLLM; CI coverage expanding |
+| Encoder-decoder | 🟡 Planned | Requires upstream vLLM support first |
+| Multi-modality | 🟢 Functional | Supported for image, video, and audio input; more models being onboarded |
+| LogProbs | 🟢 Functional | CI coverage in progress |
+| Prompt logprobs | 🟢 Functional | CI coverage in progress |
+| Async output | 🟢 Functional | CI coverage in progress |
+| Beam search | 🔵 Experimental | CI coverage in progress |
+| Guided decoding | 🟢 Functional | See [vllm-ascend#177](https://github.com/vllm-project/vllm-ascend/issues/177) |
+| Function / tool calling | 🟢 Functional | Follows upstream vLLM tool calling API |
+| Tensor parallelism | 🟢 Functional | TP >4 with graph mode is under improvement |
+| Pipeline parallelism | 🟢 Functional | Async scheduling supported; official guide in progress |
+| Expert parallelism | 🟢 Functional | Dynamic EPLB and FlashLB algorithm supported |
+| Data parallelism | 🟢 Functional | Supported for Qwen3 MoE and other models |
+| Context parallelism | 🟢 Functional | Prefill context parallel and decode context parallel supported |
+| Prefill-decode disaggregation | 🟢 Functional | xPyD supported; Mooncake and UCM connectors available |
+| Quantization | 🟢 Functional | W8A8 available; W4A8 and additional methods in progress |
+| Graph mode (AclGraph) | 🟢 Functional | Piecewise and full-graph modes; npugraph_ex enabled by default |
+| Sleep mode | 🟢 Functional | Allows NPU memory to be released between requests |
+
+<Note>
+vLLM supports two engine versions: V1 (current default) and V0 (legacy). vLLM Ascend targets V1 engine support. Features marked as experimental may have reduced support in V0 mode. See the [vLLM V1 engine guide](https://docs.vllm.ai/en/latest/usage/v1_guide/) for details on engine differences.
+</Note>
+
+## Feature deep dives
+
+<CardGroup cols={2}>
+  <Card title="Parallelism" icon="network-wired" href="/features/parallelism">
+    Tensor, pipeline, expert, data, and context parallelism options for scaling across multiple NPUs.
+  </Card>
+  <Card title="Quantization" icon="compress" href="/features/quantization">
+    W8A8 and W4A8 quantization methods for reducing memory usage and increasing throughput.
+  </Card>
+  <Card title="Speculative decoding" icon="bolt" href="/features/speculative-decoding">
+    EAGLE, EAGLE3, and ngram-based speculative decoding for lower latency.
+  </Card>
+  <Card title="PD disaggregation" icon="arrows-split-up-and-left" href="/features/pd-disaggregation">
+    Prefill-decode disaggregation for separating compute-intensive and memory-intensive phases.
+  </Card>
+  <Card title="Graph mode" icon="diagram-project" href="/features/graph-mode">
+    AclGraph piecewise and full-graph capture modes for optimized NPU execution.
+  </Card>
+</CardGroup>

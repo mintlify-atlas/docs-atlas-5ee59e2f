@@ -1,0 +1,245 @@
+---
+title: "Prefill-decode disaggregation on Ascend NPUs with Mooncake"
+description: "Separate prefill and decode onto dedicated Ascend NPU nodes with the Mooncake KV backend to maximize throughput and scale each stage independently."
+---
+
+Prefill-decode (PD) disaggregation runs the prompt-processing (prefill) and token-generation (decode) stages of LLM inference on separate groups of NPUs. Because prefill and decode have fundamentally different compute profiles—prefill is compute-bound while decode is memory-bound—separating them lets you tune each group's configuration independently and apply different optimization strategies to each stage.
+
+vLLM Ascend implements PD disaggregation using the **Mooncake** KV transfer backend. Prefill nodes act as KV producers and decode nodes as KV consumers. Once a prefill node finishes processing a request, it transfers the resulting KV cache to the paired decoder, which then begins token generation.
+
+## Architecture
+
+```
+Client → Proxy → Prefill nodes (kv_producer) ──KV transfer──▶ Decode nodes (kv_consumer) → Client
+```
+
+The proxy routes each incoming request to a prefill node. After prefill, the KV cache is pushed to a decode node via Mooncake, and the decoder generates all output tokens. Two KV transfer modes are available:
+
+| Connector | Transfer mode | Best for |
+|---|---|---|
+| `MooncakeConnectorV1` | Full KV cache after prefill | Multi-node with sufficient RDMA bandwidth |
+| `MooncakeLayerwiseConnector` | Layer-by-layer, overlapping compute | Latency-sensitive; overlaps KV transfer with decode |
+
+## Prerequisites
+
+- All nodes must be on the same WLAN with RDMA (RoCE) interconnect.
+- Mooncake must be installed on each node (see [Install Mooncake](#install-mooncake)).
+- Each node's engine must have a unique `engine_id`.
+- Avoid `kv_port` values in the range `[20000, 20000 + npu_per_node × 1000)`, which Mooncake reserves for AscendDirectTransport.
+
+<Note>
+If you see `zmq.error.ZMQError: Address already in use` at startup, increase your `kv_port` value. For a node with 16 NPUs, use `kv_port >= 36000`.
+</Note>
+
+## Install Mooncake
+
+Run these steps on every node:
+
+```bash
+git clone -b v0.3.9 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+cd Mooncake
+
+# Install MPI
+apt-get install mpich libmpich-dev -y
+
+# Install dependencies
+bash dependencies.sh -y
+
+# Build and install with Ascend RDMA support
+mkdir build && cd build
+cmake .. -DUSE_ASCEND_DIRECT=ON
+make -j && make install
+
+# Add Mooncake to LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
+```
+
+## Single-node setup (1P1D)
+
+This example deploys one prefill instance and one decode instance on the same node using two NPUs. Use this topology to validate PD disaggregation before scaling out.
+
+<Tabs>
+  <Tab title="Prefiller">
+    ```bash
+    export ASCEND_RT_VISIBLE_DEVICES=0
+    export HCCL_IF_IP=192.0.0.1
+    export GLOO_SOCKET_IFNAME="eth0"
+    export TP_SOCKET_IFNAME="eth0"
+    export HCCL_SOCKET_IFNAME="eth0"
+
+    vllm serve /model/Qwen2.5-VL-7B-Instruct \
+      --host 0.0.0.0 \
+      --port 13700 \
+      --tensor-parallel-size 1 \
+      --no-enable-prefix-caching \
+      --max-model-len 40000 \
+      --gpu-memory-utilization 0.9 \
+      --kv-transfer-config '{
+        "kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_producer",
+        "kv_port": "30000",
+        "engine_id": "0",
+        "kv_connector_extra_config": {
+          "prefill": {"dp_size": 1, "tp_size": 1},
+          "decode": {"dp_size": 1, "tp_size": 1}
+        }
+      }'
+    ```
+  </Tab>
+  <Tab title="Decoder">
+    ```bash
+    export ASCEND_RT_VISIBLE_DEVICES=1
+    export HCCL_IF_IP=192.0.0.1
+    export GLOO_SOCKET_IFNAME="eth0"
+    export TP_SOCKET_IFNAME="eth0"
+    export HCCL_SOCKET_IFNAME="eth0"
+
+    vllm serve /model/Qwen2.5-VL-7B-Instruct \
+      --host 0.0.0.0 \
+      --port 13701 \
+      --tensor-parallel-size 1 \
+      --no-enable-prefix-caching \
+      --max-model-len 40000 \
+      --gpu-memory-utilization 0.9 \
+      --kv-transfer-config '{
+        "kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": "30100",
+        "engine_id": "1",
+        "kv_connector_extra_config": {
+          "prefill": {"dp_size": 1, "tp_size": 1},
+          "decode": {"dp_size": 1, "tp_size": 1}
+        }
+      }'
+    ```
+  </Tab>
+</Tabs>
+
+Then start the proxy:
+
+```bash
+python load_balance_proxy_server_example.py \
+    --host 192.0.0.1 --port 8080 \
+    --prefiller-hosts 192.0.0.1 \
+    --prefiller-port 13700 \
+    --decoder-hosts 192.0.0.1 \
+    --decoder-ports 13701
+```
+
+Verify with:
+
+```bash
+curl http://192.0.0.1:8080/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{"model": "qwen25vl", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+## Multi-node setup (2P + multiple D)
+
+For production deployments, use the `launch_online_dp.py` script to start multiple DP instances per node, and combine with Mooncake layerwise transfer for overlap of computation and KV transfer.
+
+This example deploys DeepSeek-R1-W8A8 with 2 prefill nodes and 2 decoder nodes, each running 16 NPU chips (Atlas 800T A3).
+
+<Steps>
+  <Step title="Configure environment variables on each node">
+    Set networking variables before launching. Prefill nodes use a smaller `HCCL_BUFFSIZE` (256 MB); decode nodes use a larger one (600 MB):
+
+    ```bash
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export TASK_QUEUE_ENABLE=1
+    export VLLM_USE_V1=1
+    ```
+  </Step>
+  <Step title="Start prefill nodes">
+    On node `192.0.0.1`:
+
+    ```bash
+    python launch_online_dp.py \
+        --dp-size 2 --tp-size 8 \
+        --dp-size-local 2 --dp-rank-start 0 \
+        --dp-address 192.0.0.1 --dp-rpc-port 12321 \
+        --vllm-start-port 7100
+    ```
+
+    On node `192.0.0.2`:
+
+    ```bash
+    python launch_online_dp.py \
+        --dp-size 2 --tp-size 8 \
+        --dp-size-local 2 --dp-rank-start 0 \
+        --dp-address 192.0.0.2 --dp-rpc-port 12321 \
+        --vllm-start-port 7100
+    ```
+
+    Each prefill instance uses `--enforce-eager`, `HCCL_BUFFSIZE=256`, and `kv_role: kv_producer`.
+  </Step>
+  <Step title="Start decoder nodes">
+    On node `192.0.0.3`:
+
+    ```bash
+    python launch_online_dp.py \
+        --dp-size 32 --tp-size 1 \
+        --dp-size-local 16 --dp-rank-start 0 \
+        --dp-address 192.0.0.3 --dp-rpc-port 12321 \
+        --vllm-start-port 7100
+    ```
+
+    On node `192.0.0.4`:
+
+    ```bash
+    python launch_online_dp.py \
+        --dp-size 32 --tp-size 1 \
+        --dp-size-local 16 --dp-rank-start 16 \
+        --dp-address 192.0.0.3 --dp-rpc-port 12321 \
+        --vllm-start-port 7100
+    ```
+
+    Each decode instance uses `HCCL_BUFFSIZE=600`, `kv_role: kv_consumer`, and `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`.
+  </Step>
+  <Step title="Start the proxy">
+    Run the proxy on the same node as the prefiller:
+
+    ```bash
+    python load_balance_proxy_layerwise_server_example.py \
+        --port 1999 --host 192.0.0.1 \
+        --prefiller-hosts 192.0.0.1 192.0.0.1 192.0.0.2 192.0.0.2 \
+        --prefiller-ports 7100 7101 7100 7101 \
+        --decoder-hosts 192.0.0.3 [... 16 entries ...] 192.0.0.4 [... 16 entries ...] \
+        --decoder-ports 7100 7101 ... 7115 7100 7101 ... 7115
+    ```
+  </Step>
+</Steps>
+
+## kv_transfer_config reference
+
+| Field | Description |
+|---|---|
+| `kv_connector` | `MooncakeConnectorV1` (full transfer) or `MooncakeLayerwiseConnector` (layer-by-layer) |
+| `kv_role` | `kv_producer` (prefill) or `kv_consumer` (decode) |
+| `kv_port` | Port for KV transfer socket. Avoid the range `[20000, 20000 + npu_per_node × 1000)` |
+| `engine_id` | Unique identifier for this instance across the whole cluster |
+| `kv_connector_extra_config` | DP and TP sizes for each role, used to set up the transfer topology |
+
+## Recommended configurations
+
+| Role | `HCCL_BUFFSIZE` | Graph mode | Key flags |
+|---|---|---|---|
+| Prefill | 256 MB | Eager (`--enforce-eager`) | `enable_prefill_optimizations`, `enable_shared_expert_dp` |
+| Decode | 600–1024 MB | `FULL_DECODE_ONLY` | `multistream_overlap_shared_expert`, `finegrained_tp_config` |
+
+## When to use PD disaggregation vs co-located deployment
+
+<CardGroup cols={2}>
+  <Card title="Use PD disaggregation when..." icon="arrows-split-up-and-left">
+    - You need to scale prefill and decode independently
+    - Your workload has very long input sequences (>8 k tokens)
+    - Prefill latency (TTFT) is a hard SLO requirement
+    - You have spare NPUs to dedicate to each stage
+  </Card>
+  <Card title="Use co-located deployment when..." icon="server">
+    - You have limited hardware and want to simplify operations
+    - Input and output lengths are roughly balanced
+    - You want to enable cross-instance KV cache reuse with `MooncakeConnectorStoreV1` (set `kv_role: kv_both`)
+  </Card>
+</CardGroup>

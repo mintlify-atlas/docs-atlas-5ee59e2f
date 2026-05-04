@@ -1,0 +1,119 @@
+---
+title: "vLLM Ascend Plugin versioning and release strategy"
+description: "Understand how vLLM Ascend versions align with vLLM, how release branches are managed, and which version to choose for your deployment."
+---
+
+vLLM Ascend Plugin versions are tightly aligned with vLLM releases. Starting with vLLM 0.7.x, vllm-ascend follows [PEP 440](https://peps.python.org/pep-0440/) and publishes versions that match the corresponding vLLM release — so you always know which combination of vllm-ascend and vLLM to use together.
+
+## Version numbering
+
+Each vLLM Ascend release uses the format `v[major].[minor].[micro][rcN][.postN]` (for example, `v0.13.0rc1`, `v0.13.0`, `v0.13.0.post1`).
+
+<AccordionGroup>
+  <Accordion title="Final releases">
+    Typically scheduled every three months, with careful alignment to the vLLM upstream release cycle and the Ascend software product roadmap. Final release versions strictly match the vLLM final release format (`v[major].[minor].[micro]`).
+
+    Example: `v0.13.0` is the final release matching vLLM `v0.13.0`.
+  </Accordion>
+  <Accordion title="Release candidates (RC)">
+    Issued on demand, labeled with `rcN` to indicate the Nth release candidate. RC releases support early testing ahead of the final release.
+
+    Example: `v0.13.0rc1` is the first release candidate for vLLM Ascend 0.13.0.
+  </Accordion>
+  <Accordion title="Post releases">
+    Issued on demand to address minor errors in a final release. Unlike the [PEP 440 convention](https://peps.python.org/pep-0440/#post-releases), these versions include actual bug fixes — since the final release version must strictly align with the vLLM release format, any fixes are published as post versions.
+
+    Example: `v0.13.0.post1` is a post release for `v0.13.0` containing bug fixes.
+  </Accordion>
+</AccordionGroup>
+
+## Which version to use
+
+<CardGroup cols={2}>
+  <Card title="Latest release candidate" icon="flask">
+    Use the latest RC (such as `v0.19.1rc1`) if you want the newest features and can tolerate pre-release stability.
+  </Card>
+  <Card title="Latest stable release" icon="shield-check">
+    Use the latest final release (such as `v0.13.0`) for production workloads where stability is critical.
+  </Card>
+</CardGroup>
+
+<Note>
+  For `v0.7.3`, also install [mindie-turbo](https://pypi.org/project/mindie-turbo) as a required dependency.
+</Note>
+
+## Release compatibility matrix
+
+The table below maps vLLM Ascend versions to their required software stack.
+
+| vLLM Ascend | vLLM | Python | Stable CANN | PyTorch / torch_npu | Triton Ascend |
+|---|---|---|---|---|---|
+| v0.19.1rc1 | v0.19.1 | >=3.10, &lt;3.12 | 8.5.1 | 2.9.0 / 2.9.0 | 3.2.0 |
+| v0.18.0rc1 | v0.18.0 | >=3.10, &lt;3.12 | 8.5.1 | 2.9.0 / 2.9.0 | 3.2.0 |
+| v0.17.0rc1 | v0.17.0 | >=3.10, &lt;3.12 | 8.5.1 | 2.9.0 / 2.9.0 | 3.2.0 |
+| v0.16.0rc1 | v0.16.0 | >=3.10, &lt;3.12 | 8.5.1 | 2.9.0 / 2.9.0 | 3.2.0 |
+| v0.15.0rc1 | v0.15.0 | >=3.10, &lt;3.12 | 8.5.0 | 2.9.0 / 2.9.0 | 3.2.0 |
+| v0.14.0rc1 | v0.14.1 | >=3.10, &lt;3.12 | 8.5.0 | 2.9.0 / 2.9.0 | 3.2.0 |
+| v0.13.0rc3 | v0.13.0 | >=3.10, &lt;3.12 | 8.5.1 | 2.8.0 / 2.8.0.post2 | 3.2.0 |
+| v0.13.0 | v0.13.0 | >=3.10, &lt;3.12 | 8.5.0 | 2.8.0 / 2.8.0.post2 | 3.2.0 |
+| v0.13.0rc2 | v0.13.0 | >=3.10, &lt;3.12 | 8.5.0 | 2.8.0 / 2.8.0.post1 | 3.2.0 |
+| v0.13.0rc1 | v0.13.0 | >=3.10, &lt;3.12 | 8.3.RC2 | 2.8.0 / 2.8.0 | — |
+| v0.12.0rc1 | v0.12.0 | >=3.10, &lt;3.12 | 8.3.RC2 | 2.8.0 / 2.8.0 | — |
+| v0.11.0 | v0.11.0 | >=3.9, &lt;3.12 | 8.3.RC2 | 2.7.1 / 2.7.1.post1 | — |
+| v0.11.0rc3 | v0.11.0 | >=3.9, &lt;3.12 | 8.3.RC2 | 2.7.1 / 2.7.1.post1 | — |
+| v0.9.1 | v0.9.1 | >=3.9, &lt;3.12 | 8.2.RC1 | 2.5.1 / 2.5.1.post1 | — |
+| v0.7.3.post1 | v0.7.3 | >=3.9, &lt;3.12 | 8.1.RC1 | 2.5.1 / 2.5.1 | — |
+| v0.7.3 | v0.7.3 | >=3.9, &lt;3.12 | 8.1.RC1 | 2.5.1 / 2.5.1 | — |
+
+For the full matrix including all RC versions, see the [versioning policy source](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/community/versioning_policy.md).
+
+## Branch strategy
+
+vLLM Ascend maintains three types of branches.
+
+### Main branch
+
+The `main` branch tracks the vLLM main branch and is continuously monitored for quality through Ascend CI. It is always compatible with the latest vLLM release and a recent commit of vLLM main. Use `main` if you want to test the bleeding edge.
+
+### Release branches (`releases/vX.Y.Z`)
+
+Stable release branches are created alongside vLLM releases. For example, `releases/v0.13.0` is the stable branch for vLLM `v0.13.0`. Commits are merged into `main` first and then backported to release branches to reduce maintenance overhead.
+
+### Feature branches (`rfc/feature-name`)
+
+Feature branches are created for significant features that require broader collaboration. Each feature branch must have a corresponding RFC issue and approval from at least two maintainers. Feature branches are merged into `main` within three months or evaluated for deletion.
+
+## Currently maintained branches
+
+| Branch | State | Notes |
+|---|---|---|
+| `main` | Maintained | CI for vLLM main branch and vLLM v0.18.0 |
+| `releases/v0.13.0` | Maintained | CI for vLLM 0.13.0 |
+| `v0.11.0-dev` | Maintained | CI for vLLM 0.11.0 |
+| `v0.9.1-dev` | Maintained | CI for vLLM 0.9.1 |
+| `v0.7.3-dev` | Maintained | Bug fixes only; no new release tags |
+| `v0.7.1-dev` | Unmaintained | Documentation fixes only |
+
+Branches transition through the following states:
+
+| State | Summary |
+|---|---|
+| Maintained | Bug fixes accepted; releases produced; CI commitment |
+| Unmaintained | Bug fixes accepted; no releases; no CI commitment |
+| End of Life (EOL) | No longer accepting changes |
+
+## Backward compatibility
+
+The `main` branch is kept compatible with vLLM main and the latest one or two vLLM releases. Both targets are verified by Ascend E2E CI on every commit.
+
+vLLM Ascend includes a version check mechanism that reads the installed vLLM package version to select the correct code path. If you install a development or editable version of vLLM and encounter an `InvalidVersion` error, set the `VLLM_VERSION` environment variable to specify your vLLM version explicitly:
+
+```bash
+export VLLM_VERSION=0.13.0
+```
+
+## Software dependency policy
+
+- **torch-npu stable versions** (published to PyPI every three months) are used in vLLM Ascend final releases.
+- **torch-npu monthly dev versions** may only be used in RC releases for rapid iteration.
+- **torch-npu nightly versions** are not used in any vLLM Ascend version or branch.

@@ -1,0 +1,241 @@
+---
+title: "Contributing to the vLLM Ascend plugin"
+description: "Learn how to set up your development environment, write compliant code, and submit a pull request to the vLLM Ascend plugin project."
+---
+
+vLLM Ascend is an open-source hardware plugin. Contributions of all kinds are welcome—bug fixes, new features, documentation improvements, and test coverage. This guide walks you through everything you need to get your first pull request merged.
+
+## Development environment setup
+
+<Steps>
+  <Step title="Fork and clone the repository">
+    Fork [vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend) on GitHub, then clone your fork locally:
+
+    ```bash
+    git clone https://github.com/YOUR_USERNAME/vllm-ascend.git
+    cd vllm-ascend
+    ```
+
+    Add the upstream remote so you can pull in future changes:
+
+    ```bash
+    git remote add upstream https://github.com/vllm-project/vllm-ascend.git
+    ```
+  </Step>
+  <Step title="Install development dependencies">
+    Install the package in editable mode together with the development extras:
+
+    ```bash
+    pip install -e .[dev]
+    ```
+
+    For linting-only work on non-Linux machines, install the lint requirements separately:
+
+    ```bash
+    pip install -r requirements-lint.txt
+    ```
+  </Step>
+  <Step title="Verify your setup with linting">
+    Check code for style violations:
+
+    ```bash
+    ruff check vllm_ascend/
+    ```
+
+    Apply automatic formatting:
+
+    ```bash
+    ruff format vllm_ascend/
+    ```
+
+    Run the full pre-commit CI check (required for all file types, including Markdown):
+
+    ```bash
+    bash format.sh ci
+    ```
+
+    <Note>
+      If `markdownlint` modifies files during the CI check, re-stage them with `git add` and amend your commit before pushing.
+    </Note>
+  </Step>
+  <Step title="Create a branch and make your changes">
+    Always branch off `main` and keep your branch focused on a single concern:
+
+    ```bash
+    git checkout -b feat/my-improvement
+    ```
+
+    Make your changes, add tests, and verify the full test suite passes before committing.
+  </Step>
+  <Step title="Commit with sign-off">
+    vLLM Ascend requires the Developer Certificate of Origin (DCO). Every commit must include a `Signed-off-by` line, which `git commit -s` adds automatically:
+
+    ```bash
+    git commit -s -m "feat(attention): add flash attention support for Ascend CANN"
+    ```
+
+    See [Commit message format](#commit-message-format) below for the full convention.
+  </Step>
+  <Step title="Push to your fork and open a pull request">
+    Push to your fork (never directly to the main repository):
+
+    ```bash
+    git push -u myfork your-branch-name
+    ```
+
+    Open a PR from your fork to `vllm-project/vllm-ascend:main`. Fill in the PR template completely.
+  </Step>
+</Steps>
+
+## Commit message format
+
+vLLM Ascend follows [Conventional Commits](https://www.conventionalcommits.org/). Every commit must be signed off.
+
+```text
+<type>(<scope>): <short summary>
+
+<body — what changed and why>
+
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+**Valid types:** `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `chore`
+
+<CodeGroup>
+
+```text Good examples
+feat(npu): add flash attention support for Ascend CANN
+
+- Implements FlashAttention-2 kernel for NPU backend
+- Reduces memory usage by 30% compared to baseline
+
+Signed-off-by: Jane Dev <jane@example.com>
+
+fix(model_runner): correct padding token handling
+
+- Fixes token padding that caused incorrect attention masks
+- Addresses issue #1234
+
+Signed-off-by: Jane Dev <jane@example.com>
+
+perf: avoid CPU-NPU sync in attention computation
+
+- Inline computation to avoid tensor.item() calls
+- Improves throughput by 15%
+
+Signed-off-by: Jane Dev <jane@example.com>
+```
+
+```text Bad examples
+fix bug
+add feature
+update code
+```
+
+</CodeGroup>
+
+## PR title format
+
+PR titles must follow the pattern `[Type][Module] Description`.
+
+| Field | Examples |
+|---|---|
+| **Type** | `CI`, `Doc`, `Bugfix`, `Feat`, `Platform`, `Refactor`, `Attention`, `Kernel`, `Test`, `Misc` |
+| **Module** | `Misc`, `Model`, `Worker`, `Core`, `Communicator`, `ModelRunner` |
+
+```text
+[Doc][Misc] Update contribution guidelines
+[Bugfix] Fix CPU binding logic
+[Feat][Attention] Add context parallel attention for A3
+[CI] Update image build workflow
+```
+
+<Note>
+  If your PR spans more than one category, include all relevant type prefixes.
+</Note>
+
+## Environment variables
+
+All runtime configuration must go through the centralized registry in `vllm_ascend/envs.py`.
+
+- Variable names must use the `VLLM_ASCEND_*` prefix.
+- Each variable needs a comment documenting its purpose, default value, and valid range.
+- Reference variables throughout the codebase via `from vllm_ascend import envs`—never hardcode the string name.
+
+```python
+import os
+
+env_variables = {
+    # Enable NZ memory layout optimization. Default: 1 (enabled).
+    "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
+}
+```
+
+<Warning>
+  All new environment variables require code review. Reviewers check that the name follows the `VLLM_ASCEND_*` convention, the default is appropriate for all supported hardware, and the variable is used in a performance-critical path.
+</Warning>
+
+## Adding new model support
+
+vLLM Ascend is a hardware plugin—it does not add new model files directly. Use one of these patterns instead:
+
+**Patching** (`vllm_ascend/patch/`): Override a specific upstream method at module level.
+
+```python
+# vllm_ascend/patch/worker/patch_deepseek.py
+from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
+
+def forward(self, input_ids, positions, ...):
+    # NPU-specific forward implementation
+    ...
+
+DeepseekV2Model.forward = forward  # Patch upstream class
+```
+
+**Inheritance**: Extend an existing vLLM class (for example, `NPUModelRunner(GPUModelRunner)`) and add NPU-specific behavior via composition.
+
+<Note>
+  Patching is a temporary solution. Every new patch must document a future plan for contributing the change upstream to vLLM. Keep patches minimal and targeted.
+</Note>
+
+## Code style
+
+<CardGroup cols={2}>
+  <Card title="Naming conventions" icon="code">
+    - **Classes:** `PascalCase` — `NPUModelRunner`, `AscendSampler`
+    - **Functions/methods:** `snake_case` — `forward_pass`, `compute_attention`
+    - **Constants:** `ALL_UPPER_CASE` — `MAX_BATCH_SIZE`
+    - **Variables:** `snake_case` — `token_ids`, `sequence_lengths`
+  </Card>
+  <Card title="Key rules" icon="list-checks">
+    - No magic numbers — use named constants
+    - No new mutable global state without explicit justification
+    - All imports at the top of the file (with narrow exceptions for circular imports and `TYPE_CHECKING` guards)
+    - Descriptive names that reflect purpose, not implementation details
+  </Card>
+</CardGroup>
+
+```python
+# Bad — magic number
+if seq_len > 2048:
+    ...
+
+# Good — named constant
+MAX_CONTEXT_LENGTH = 2048
+if seq_len > MAX_CONTEXT_LENGTH:
+    ...
+```
+
+## Pre-merge checklist
+
+Before requesting review, confirm that:
+
+- [ ] Code follows naming conventions and has no magic numbers
+- [ ] No new mutable global state added without justification
+- [ ] New environment variables use `VLLM_ASCEND_*` prefix and are registered in `envs.py`
+- [ ] Unit tests added in `tests/ut/` for new logic
+- [ ] E2E tests added in `tests/e2e/` for new features
+- [ ] NPU-specific code verified on actual Ascend hardware
+- [ ] All commits are signed off (`git commit -s`)
+- [ ] PR description follows the template and is complete
+- [ ] `bash format.sh ci` passes cleanly

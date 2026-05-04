@@ -1,0 +1,355 @@
+---
+title: "Hardware-specific guides for Ascend NPU"
+description: "Configuration guides for Atlas A2, Atlas A3, and Atlas 300I Duo hardware, including Docker device mounts, HCCL settings, and troubleshooting steps."
+---
+
+The vLLM Ascend plugin runs on three main Ascend NPU hardware families: Atlas A2 (Atlas 800I A2 and Atlas 800 A2), Atlas A3 (Atlas 800 A3), and the experimental Atlas 300I Duo (310P). Each hardware family has different device paths, memory capacities, and supported features. This page covers the Docker configuration, environment variables, and HCCL settings specific to each platform.
+
+## Atlas A2 series
+
+The Atlas 800I A2 and Atlas 800 A2 provide 8 NPUs per node with 64 GB (or 32 GB) HBM per card. This is the primary target for single-node and multi-node deployments of large models such as DeepSeek-R1-W8A8 and Qwen3-235B-A22B.
+
+### Device paths
+
+Atlas A2 exposes NPU devices at `/dev/davinci0` through `/dev/davinci7`. The management and communication devices are always required:
+
+| Device | Purpose |
+|---|---|
+| `/dev/davinci[0-7]` | NPU compute devices |
+| `/dev/davinci_manager` | NPU management interface |
+| `/dev/devmm_svm` | Shared virtual memory |
+| `/dev/hisi_hdc` | Host-device communication |
+
+### Docker device mounts (8 NPU single node)
+
+```bash
+export IMAGE=quay.io/ascend/vllm-ascend:<version>
+
+docker run --rm \
+  --name vllm-ascend \
+  --net=host \
+  --shm-size=1g \
+  --device /dev/davinci0 \
+  --device /dev/davinci1 \
+  --device /dev/davinci2 \
+  --device /dev/davinci3 \
+  --device /dev/davinci4 \
+  --device /dev/davinci5 \
+  --device /dev/davinci6 \
+  --device /dev/davinci7 \
+  --device /dev/davinci_manager \
+  --device /dev/devmm_svm \
+  --device /dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi \
+  -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -v /root/.cache:/root/.cache \
+  -it $IMAGE bash
+```
+
+<Note>
+  The `--net=host` flag is required for multi-node HCCL communication. If you use bridge networking, expose the required ports explicitly before starting the container.
+</Note>
+
+### HCCL configuration for multi-node
+
+When running across multiple Atlas A2 nodes, set the following environment variables on each node:
+
+```bash
+nic_name="xxxx"    # network interface name from ifconfig
+local_ip="xxxx"    # IP address of this node
+node0_ip="xxxx"    # IP address of the master node
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_BUFFSIZE=200
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_INTRA_PCIE_ENABLE=1
+export HCCL_INTRA_ROCE_ENABLE=0
+```
+
+`HCCL_INTRA_PCIE_ENABLE=1` and `HCCL_INTRA_ROCE_ENABLE=0` configure intra-node communication to use PCIe, which is the recommended setting for Atlas A2 multi-node deployments.
+
+### Typical serving configuration (8-NPU single node, TP=8)
+
+```bash
+vllm serve <model-path> \
+  --tensor-parallel-size 8 \
+  --max-num-seqs 16 \
+  --max-model-len 16384 \
+  --gpu-memory-utilization 0.92 \
+  --trust-remote-code
+```
+
+---
+
+## Atlas A3 series
+
+The Atlas 800 A3 provides 16 NPUs per node with 64 GB HBM per card, giving 1 TB of total NPU memory per node. This platform supports the highest EP configurations and is recommended for the largest models.
+
+### Device paths
+
+Atlas A3 exposes NPU devices at `/dev/davinci0` through `/dev/davinci15`:
+
+| Device | Purpose |
+|---|---|
+| `/dev/davinci[0-15]` | NPU compute devices (16 total) |
+| `/dev/davinci_manager` | NPU management interface |
+| `/dev/devmm_svm` | Shared virtual memory |
+| `/dev/hisi_hdc` | Host-device communication |
+
+### Docker device mounts (16 NPU single node)
+
+```bash
+# Use the A3-specific image tag
+export IMAGE=quay.io/ascend/vllm-ascend:<version>-a3
+
+docker run --rm \
+  --name vllm-ascend \
+  --shm-size=1g \
+  --net=host \
+  --device /dev/davinci0 \
+  --device /dev/davinci1 \
+  --device /dev/davinci2 \
+  --device /dev/davinci3 \
+  --device /dev/davinci4 \
+  --device /dev/davinci5 \
+  --device /dev/davinci6 \
+  --device /dev/davinci7 \
+  --device /dev/davinci8 \
+  --device /dev/davinci9 \
+  --device /dev/davinci10 \
+  --device /dev/davinci11 \
+  --device /dev/davinci12 \
+  --device /dev/davinci13 \
+  --device /dev/davinci14 \
+  --device /dev/davinci15 \
+  --device /dev/davinci_manager \
+  --device /dev/devmm_svm \
+  --device /dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi \
+  -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -v /root/.cache:/root/.cache \
+  -it $IMAGE bash
+```
+
+<Warning>
+  Always use the **`-a3` image tag** for Atlas A3 hardware. The default image tag is built for Atlas A2 and may not include A3-specific kernel optimizations.
+</Warning>
+
+### A3-specific environment variables
+
+```bash
+export HCCL_OP_EXPANSION_MODE="AIV"    # enables AIVector ROCE scheduling
+export VLLM_ASCEND_ENABLE_MLAPO=1      # enables MLA fusion operator (decode nodes only in PD mode)
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1 # enables FlashComm v1 for TP > 1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+```
+
+`HCCL_OP_EXPANSION_MODE="AIV"` enables the AIVector core to schedule ROCE communication directly, which significantly improves throughput on A3 hardware.
+
+### Higher EP configurations
+
+Atlas A3 supports large-scale expert parallelism with up to 32 EP workers within a single node. For PD disaggregation with DeepSeek-V3.1 (2P1D), the recommended decode configuration is `DP32+TP1`:
+
+```bash
+vllm serve <model-path> \
+  --data-parallel-size 32 \
+  --tensor-parallel-size 1 \
+  --enable-expert-parallel \
+  --async-scheduling \
+  --gpu-memory-utilization 0.92
+```
+
+### A3-specific features
+
+<CardGroup cols={2}>
+  <Card title="MLAPO fusion" icon="bolt">
+    Set `VLLM_ASCEND_ENABLE_MLAPO=1` to enable MLA (Multi-head Latent Attention) operator fusion. This significantly improves decode performance but consumes additional NPU memory. In PD disaggregation, enable only on decode nodes.
+  </Card>
+  <Card title="Fused MoE MC2" icon="microchip">
+    Set `VLLM_ASCEND_ENABLE_FUSED_MC2=1` (W8A8 only) or `=2` (EP32 scenarios) to enable fused MoE operators that reduce prefill and decode latency. This is an experimental feature for Atlas A3.
+  </Card>
+  <Card title="HCCL buffer size" icon="database">
+    For large EP configurations, increase `HCCL_BUFFSIZE` to 512–1100 MB. The default of 200 MB may limit throughput for large all-to-all expert communications.
+  </Card>
+  <Card title="Layer sharding" icon="table">
+    For DeepSeek-V3.2 multi-node deployments, use `--additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}'` to distribute specific projection layers across nodes.
+  </Card>
+</CardGroup>
+
+---
+
+## Atlas 300I Duo (310P)
+
+<Warning>
+  The Atlas 300I Duo (310P) series is **experimental**. Model coverage, supported features, and performance characteristics may change in future releases without notice.
+</Warning>
+
+### Limitations
+
+The Atlas 300I (310P) series has the following constraints compared to A2/A3:
+
+- **Eager mode only**: ACLGraph (cuda graph) is not supported. Always pass `--enforce-eager` or set `enforce_eager=True` in Python.
+- **float16 only**: BFloat16 is not supported. Some ATB operators do not work with bf16 on 310P. Always pass `--dtype float16`.
+- **No dynamic max-model-len**: Omitting `--max-model-len` triggers auto-detection, which may resolve to a very large value. The attention mask is built as a full `[max_model_len × max_model_len]` float16 tensor, which can OOM. Always set a conservative explicit value, for example `--max-model-len 4096`.
+
+### Docker device mounts
+
+Use the dedicated `310p` image tag:
+
+```bash
+export IMAGE=quay.io/ascend/vllm-ascend:v0.10.0rc1-310p
+
+docker run --rm \
+  --name vllm-ascend \
+  --shm-size=1g \
+  --device /dev/davinci0 \
+  --device /dev/davinci1 \
+  --device /dev/davinci2 \
+  --device /dev/davinci3 \
+  --device /dev/davinci4 \
+  --device /dev/davinci5 \
+  --device /dev/davinci6 \
+  --device /dev/davinci7 \
+  --device /dev/davinci_manager \
+  --device /dev/devmm_svm \
+  --device /dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -v /root/.cache:/root/.cache \
+  -p 8000:8000 \
+  -it $IMAGE bash
+```
+
+### Online serving (310P)
+
+```bash
+export VLLM_USE_MODELSCOPE=True
+export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
+
+# Qwen3-0.6B on 1 card
+vllm serve Qwen/Qwen3-0.6B \
+  --tensor-parallel-size 1 \
+  --max-model-len 4096 \
+  --enforce-eager \
+  --dtype float16
+
+# Qwen2.5-7B-Instruct on 2 cards
+vllm serve Qwen/Qwen2.5-7B-Instruct \
+  --tensor-parallel-size 2 \
+  --max-model-len 4096 \
+  --enforce-eager \
+  --dtype float16
+```
+
+### Offline inference (310P)
+
+```python
+import gc
+import torch
+from vllm import LLM, SamplingParams
+from vllm.distributed.parallel_state import (
+    destroy_distributed_environment, destroy_model_parallel
+)
+
+def clean_up():
+    destroy_model_parallel()
+    destroy_distributed_environment()
+    gc.collect()
+    torch.npu.empty_cache()
+
+prompts = ["Hello, my name is", "The future of AI is"]
+sampling_params = SamplingParams(max_completion_tokens=100, temperature=0.0)
+
+llm = LLM(
+    model="Qwen/Qwen3-0.6B",
+    tensor_parallel_size=1,
+    max_model_len=4096,
+    enforce_eager=True,   # required for 310P
+    dtype="float16",      # required for 310P
+)
+
+outputs = llm.generate(prompts, sampling_params)
+for output in outputs:
+    print(f"Prompt: {output.prompt!r}, Generated: {output.outputs[0].text!r}")
+
+del llm
+clean_up()
+```
+
+---
+
+## Troubleshooting hardware issues
+
+### Check NPU status with npu-smi
+
+Run `npu-smi info` to verify that all NPUs are recognized and healthy:
+
+```bash
+npu-smi info
+```
+
+The output lists each card with its index, chip ID, name, health status, power consumption, temperature, and memory usage. A healthy card shows `Health: OK` and non-zero `HBM-Usage`.
+
+To check a specific card in detail:
+
+```bash
+npu-smi info -t detail -i 0   # card index 0
+```
+
+### libatb.so not found error
+
+If you see an error such as `libatb.so: cannot open shared object file`, the ATB (Ascend Transformer Boost) library is not on the library path. Add the driver library directory:
+
+```bash
+export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/:$LD_LIBRARY_PATH
+```
+
+This path is also mounted as a volume in all Docker examples above. If the error persists inside the container, verify that the host driver version matches the toolkit version installed in the image.
+
+### Testing multi-node connectivity with hccn_tool
+
+Before starting a multi-node deployment, verify that HCCL can communicate across nodes:
+
+```bash
+# On each node, list available HCCL network interfaces
+/usr/local/Ascend/driver/tools/hccn_tool -i 0 -netdetect -link
+
+# Test connectivity from node 0 to node 1
+/usr/local/Ascend/driver/tools/hccn_tool -i 0 -ping -d <node1_ip>
+```
+
+If the ping test fails, check the following:
+
+1. Verify that both nodes have the same HCCN configuration file at `/etc/hccn.conf`.
+2. Confirm that the network interface name in `HCCL_SOCKET_IFNAME` matches the output of `ifconfig`.
+3. Ensure that firewall rules allow HCCL traffic on the required ports.
+4. Check that `HCCL_IF_IP` is set to the correct local IP address on each node.
+
+### Memory allocation errors (OOM)
+
+If vLLM exits with an out-of-memory error during the profiling phase:
+
+- Reduce `--gpu-memory-utilization` (for example, from `0.95` to `0.90`).
+- Reduce `--max-num-batched-tokens` to lower peak activation memory.
+- Reduce `--max-model-len` to shrink the KV cache allocation.
+- Set `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` to reduce memory fragmentation.
+
+For Atlas 300I (310P), always set an explicit `--max-model-len` (such as `4096`) to avoid the `O(max_model_len²)` attention mask allocation.

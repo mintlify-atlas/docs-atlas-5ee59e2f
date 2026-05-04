@@ -1,0 +1,117 @@
+---
+title: "vLLM Ascend Plugin community and project governance"
+description: "Learn how the vLLM Ascend Plugin is governed, who the key roles are, how decisions get made, and how to get involved as a contributor or maintainer."
+---
+
+vLLM Ascend Plugin is an open-source project under the [vllm-project](https://github.com/vllm-project) organization, community-maintained and governed according to a hierarchical technical structure. Its mission is to provide easy, fast, and cost-effective LLM serving for everyone on Ascend NPUs, while actively contributing to the broader vLLM ecosystem.
+
+## Project structure
+
+vLLM Ascend is a hardware plugin that lives under the vLLM community. The vLLM community holds ultimate authority to appoint roles and make final decisions, while day-to-day technical direction is driven by a group of maintainers. All governance decisions are made in the open through GitHub issues, pull requests, and weekly community meetings.
+
+## Roles and responsibilities
+
+<AccordionGroup>
+  <Accordion title="Contributor">
+    Contributors are community members who consistently and actively participate in the project. This includes — but is not limited to — filing issues, reviewing pull requests, submitting commits, and engaging with the community.
+
+    **Requirements:** Complete at least one contribution to the project.
+
+    **Responsibilities:**
+    - Help new contributors get started
+    - Handle and respond to community questions
+    - Review RFCs and code changes
+
+    Contributors are granted `Triage` permissions on the [vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend) repository, giving them read and clone access along with the ability to manage issues and pull requests.
+  </Accordion>
+  <Accordion title="Maintainer">
+    Maintainers are responsible for the project's technical direction and long-term success. They hold code merge permissions and lead roadmap planning.
+
+    **Requirements:**
+    - Deep understanding of both vLLM and vLLM Ascend codebases
+    - Sustained, high-quality code contributions
+    - Competency in design, development, and PR review workflows
+
+    **Responsibilities:**
+    - **Review quality:** Actively participate in community code reviews to ensure high-quality integration
+    - **Quality contributions:** Successfully develop and deliver at least one major feature
+    - **Community involvement:** Address issues, respond to forum inquiries, participate in discussions, and engage in community events such as weekly meetings
+
+    Maintainers are granted write access to the [vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend) repository, including permission to read, clone, push, and manage issues and pull requests.
+
+    Approval from existing maintainers is required for new maintainer nominations. The vLLM community has final decision-making authority.
+  </Accordion>
+</AccordionGroup>
+
+## Nominating and removing maintainers
+
+Membership in vLLM Ascend is merit-based. To be considered for the maintainer group, you must demonstrate strong and continued alignment with the overall vLLM Ascend principles through contributions, reviews, and discussions. Membership is granted to individuals, not companies.
+
+**Nomination:** Anyone can nominate a candidate — including self-nominations. All existing maintainers review and evaluate each nomination. The nominator should provide evidence of the nominee's qualifications, such as review quality, contributions, and community involvement.
+
+**Removal:** Anyone can nominate an individual for removal, including self-nominations. Maintainers evaluate removal nominations based on factors such as prolonged inactivity, misalignment with project direction, or other disqualifying factors.
+
+**Emeritus status:** Maintainers who have been inactive for a long time may be transitioned to emeritus status under lenient criteria.
+
+## Decision-making process
+
+Technical decisions follow a collaborative process:
+
+<Steps>
+  <Step title="Open an issue or RFC">
+    Propose significant changes by filing a GitHub issue or RFC. Feature branches require an RFC and approval from at least two maintainers before they are created.
+  </Step>
+  <Step title="Community discussion">
+    The community reviews the proposal in the issue thread or at the weekly meeting. Anyone can participate in the discussion.
+  </Step>
+  <Step title="Maintainer review">
+    Existing maintainers evaluate the proposal and reach consensus. The vLLM community holds final authority on decisions that affect the broader project.
+  </Step>
+  <Step title="Implementation and merge">
+    Once approved, changes are implemented following the project's contribution guidelines and merged by a maintainer after passing CI and code review.
+  </Step>
+</Steps>
+
+## Weekly community meeting
+
+The vLLM Ascend community meets weekly to discuss ongoing work, proposals, and community updates.
+
+- **When:** Every Wednesday, 15:00–16:00 UTC+8 ([convert to your timezone](https://dateful.com/convert/gmt8?t=15))
+- **Agenda and notes:** [Meeting document](https://tinyurl.com/vllm-ascend-meeting)
+
+All community members are welcome to attend and share ideas.
+
+## Communication channels
+
+<CardGroup cols={2}>
+  <Card title="GitHub Issues" icon="github" href="https://github.com/vllm-project/vllm-ascend/issues">
+    File bug reports, feature requests, or start a discussion directly in the repository.
+  </Card>
+  <Card title="User forum" icon="comments" href="https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support">
+    Post usage questions and get help from community developers and users at discuss.vllm.ai.
+  </Card>
+  <Card title="Slack" icon="slack" href="https://slack.vllm.ai">
+    Join the **#SIG-Ascend** channel at slack.vllm.ai for real-time discussion.
+  </Card>
+  <Card title="WeChat group" icon="message">
+    Join the WeChat community group via [this issue thread](https://github.com/vllm-project/vllm-ascend/issues/227) for Chinese-language discussion.
+  </Card>
+</CardGroup>
+
+## Code of conduct
+
+vLLM Ascend follows the vLLM community's code of conduct. All participants are expected to uphold these standards in every interaction — in GitHub issues, pull requests, meetings, and other community spaces.
+
+See the [vLLM Code of Conduct](https://github.com/vllm-project/vllm/blob/main/CODE_OF_CONDUCT.md) for the full text.
+
+## Developer Certificate of Origin (DCO)
+
+All commits to vLLM Ascend must be signed off with a Developer Certificate of Origin. This certifies that you wrote or have the right to submit the code under the project's open-source license.
+
+Sign off your commits using:
+
+```bash
+git commit -s -m "your commit message"
+```
+
+This adds a `Signed-off-by` line to your commit. Pull requests without signed-off commits will not be merged.

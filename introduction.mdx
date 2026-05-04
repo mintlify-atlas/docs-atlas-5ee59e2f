@@ -1,0 +1,81 @@
+---
+title: "Introduction to the vLLM Ascend Plugin"
+description: "Learn how vLLM Ascend Plugin enables seamless large language model inference on Huawei Ascend NPU hardware using vLLM's pluggable hardware interface."
+---
+
+vLLM Ascend Plugin (`vllm-ascend`) is a community-maintained hardware plugin that lets you run vLLM workloads on Huawei Ascend NPUs without modifying the core vLLM codebase. It implements the [hardware-pluggable RFC](https://github.com/vllm-project/vllm/issues/11162), which defines a clean interface for integrating third-party accelerators into vLLM. Popular open-source models — including Transformer-style models, Mixture-of-Experts (MoE), embedding models, and multi-modal LLMs — run on Ascend NPUs through this plugin.
+
+## Hardware requirements
+
+The following Ascend NPU hardware families are supported:
+
+| Hardware | Series | Status |
+|---|---|---|
+| Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 Box16, Atlas 300T A2 | Atlas A2 Training | Supported |
+| Atlas 800I A2 | Atlas A2 Inference | Supported |
+| Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD | Atlas A3 Training | Supported |
+| Atlas 800I A3 | Atlas A3 Inference | Supported |
+| Atlas 300I Duo | Atlas 300I | Experimental |
+
+<Warning>
+Atlas 200I A2 and legacy Ascend 910 / 910 Pro B devices are not supported and have no planned support at this time.
+</Warning>
+
+## Software requirements
+
+Before installing the plugin, make sure your environment meets the following software requirements:
+
+| Component | Required version | Notes |
+|---|---|---|
+| Python | 3.10 – 3.11 | Python 3.12 and above are not supported |
+| CANN | 8.5.1 | Ascend Compute Architecture for Neural Networks |
+| PyTorch | 2.9.0 | Must match `torch-npu` exactly |
+| torch-npu | 2.9.0 | Installed automatically via pip |
+| NNAL | 8.5.1 | Required for `libatb.so` and advanced tensor operations |
+| vLLM | Same version as `vllm-ascend` | Install before `vllm-ascend` |
+
+## Architecture overview
+
+vLLM Ascend Plugin follows the hardware plugin model introduced in vLLM's pluggable hardware RFC. Instead of modifying vLLM directly, the plugin registers itself via Python entry points and vLLM loads it at runtime through the `vllm.platform_plugins` group.
+
+The plugin interface decouples Ascend NPU support from the vLLM core. All NPU-specific code lives in `vllm-ascend` — including the model runner, custom operators, patches, and distributed communication adapters — while vLLM itself remains hardware-agnostic. You can verify that the plugin is active by checking for this log line at startup:
+
+```shell
+INFO Platform plugin ascend is activated
+```
+
+This architecture means you install two packages (`vllm` and `vllm-ascend`) with matching version numbers, and the plugin activates automatically.
+
+## Branch and version strategy
+
+vLLM Ascend maintains two kinds of branches:
+
+- **`main`** — tracks the vLLM `main` branch and receives continuous integration (CI) coverage against the latest vLLM main and the current stable tag.
+- **`releases/vX.Y.Z`** — created alongside each vLLM stable release (for example, `releases/v0.13.0` tracks vLLM v0.13.0). These branches receive bug fixes only.
+
+| Branch | Status | CI coverage |
+|---|---|---|
+| `main` | Maintained | vLLM main + v0.18.0 |
+| `releases/v0.13.0` | Maintained | vLLM v0.13.0 |
+| `v0.9.1-dev` | Maintained | vLLM v0.9.1 |
+| `v0.11.0-dev` | Maintained | vLLM v0.11.0 |
+| `v0.7.3-dev` | Maintained | vLLM v0.7.3 (bug fixes only) |
+
+Use the `releases/vX.Y.Z` branch for production deployments and `main` when you want the latest features alongside upstream vLLM.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install vLLM Ascend via pip or Docker, including CANN setup and multi-node deployment.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first inference on an Ascend NPU in minutes using offline batched inference or the OpenAI-compatible API.
+  </Card>
+  <Card title="Supported models" icon="list" href="/user-guide/supported-models">
+    Browse the full list of supported model architectures and their feature compatibility.
+  </Card>
+  <Card title="Parallelism" icon="server" href="/features/parallelism">
+    Configure tensor parallelism, pipeline parallelism, and expert parallelism for large models.
+  </Card>
+</CardGroup>

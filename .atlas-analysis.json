@@ -1,0 +1,101 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "vLLM Ascend Plugin",
+  "projectDescription": "A community-maintained hardware plugin for running vLLM LLM inference seamlessly on Huawei Ascend NPUs.",
+  "theme": "aspen",
+  "primaryColor": "#ecb437",
+  "lightColor": "#69a5fb",
+  "darkColor": "#e7e4df",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "User Guide",
+            "pages": [
+              "user-guide/supported-models",
+              "user-guide/supported-features",
+              "user-guide/configuration",
+              "user-guide/deployment",
+              "user-guide/release-notes"
+            ]
+          },
+          {
+            "group": "Features",
+            "pages": [
+              "features/parallelism",
+              "features/quantization",
+              "features/speculative-decoding",
+              "features/pd-disaggregation",
+              "features/graph-mode"
+            ]
+          },
+          {
+            "group": "Model Tutorials",
+            "pages": [
+              "tutorials/deepseek",
+              "tutorials/qwen3",
+              "tutorials/multimodal",
+              "tutorials/hardware-guides"
+            ]
+          },
+          {
+            "group": "Developer Guide",
+            "pages": [
+              "developer/contributing",
+              "developer/architecture",
+              "developer/performance-debugging",
+              "developer/testing"
+            ]
+          },
+          {
+            "group": "Community",
+            "pages": [
+              "community/governance",
+              "community/versioning",
+              "community/user-stories",
+              "community/faq"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Seamless vLLM integration on Ascend NPU via hardware plugin interface",
+    "Support for Atlas A2 and A3 series NPU hardware",
+    "Expert Parallelism (EP) for large-scale MoE model deployment",
+    "Prefill-Decode disaggregation with Mooncake backend",
+    "ACL Graph mode for optimized NPU kernel execution",
+    "W8A8, W4A8, and W4A4 quantization support",
+    "Context Parallelism and Tensor Parallelism for long sequences",
+    "Speculative decoding (suffix-based) for improved throughput",
+    "Multi-modal LLM support (vision-language models)",
+    "Kubernetes deployment via Volcano/Athena integration",
+    "Dynamic Expert Load Balancing (EPLB)",
+    "LoRA adapter support for fine-tuned model serving"
+  ],
+  "publicApiSurface": [
+    "vllm_ascend:register (plugin entrypoint)",
+    "LLM(model=...) — offline batched inference via vLLM API",
+    "vllm serve <model> — OpenAI-compatible server",
+    "SamplingParams — generation configuration",
+    "vllm_ascend.envs — environment variable configuration",
+    "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL — enable context parallelism",
+    "VLLM_ASCEND_ENABLE_NZ — weight format optimization",
+    "VLLM_ASCEND_ENABLE_FUSED_MC2 — fused MC2 operator",
+    "DYNAMIC_EPLB — dynamic expert load balancing",
+    "SOC_VERSION — target Ascend chip version for build",
+    "vllm_ascend.platform.AscendPlatform — NPU platform class",
+    "vllm_ascend.worker.NPUModelRunner — NPU model runner"
+  ]
+}

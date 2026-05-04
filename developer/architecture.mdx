@@ -1,0 +1,125 @@
+---
+title: "vLLM Ascend plugin architecture overview"
+description: "How vLLM Ascend works as a hardware plugin: platform registration, the patching system, custom NPU operators, and the ACL graph subsystem explained."
+---
+
+vLLM Ascend is a **hardware plugin** that integrates with upstream vLLM through the [pluggable hardware interface RFC](https://github.com/vllm-project/vllm/issues/11162). Rather than forking vLLM or shipping separate model files, the plugin registers itself as a platform, intercepts the appropriate extension points, and provides Ascend NPU-specific implementations for attention, operators, distributed communication, and more. This page explains how the pieces fit together.
+
+## Plugin registration
+
+When vLLM starts, it discovers platform plugins via Python entry points. vLLM Ascend registers itself through the `vllm.platform_plugins` group in `pyproject.toml`:
+
+```text
+vllm.platform_plugins:
+  ascend = vllm_ascend:register
+```
+
+The `register` function in `vllm_ascend/__init__.py` tells vLLM to use `AscendPlatform` from `vllm_ascend/platform.py` as the active platform. You can verify the plugin is loaded by checking startup logs:
+
+```text
+INFO  Available plugins for group vllm.platform_plugins:
+INFO  - ascend -> vllm_ascend:register
+INFO  Platform plugin ascend is activated
+```
+
+## Key components
+
+<CardGroup cols={2}>
+  <Card title="vllm_ascend/platform.py" icon="cpu">
+    Defines `AscendPlatform`, the central class that vLLM calls to discover all NPU capabilities. It registers the static graph wrapper, handles config normalization, and triggers platform-level patches early in startup.
+  </Card>
+  <Card title="vllm_ascend/worker/" icon="server">
+    Contains the NPU model runners. `model_runner_v1.py` targets the vLLM v1 engine and inherits from `GPUModelRunner`, overriding NPU-specific behavior. `v2/model_runner.py` supports the v2 engine, and `_310p/model_runner_310p.py` handles the Ascend 310P chip.
+  </Card>
+  <Card title="vllm_ascend/patch/" icon="wrench">
+    A patching system for overriding upstream vLLM behavior without forking. Patches are organized into `platform/` (applied in the main process) and `worker/` (applied in worker processes). See [Patching pattern](#patching-pattern) below.
+  </Card>
+  <Card title="vllm_ascend/ops/" icon="bolt">
+    Custom NPU operators implemented using CANN kernels. Includes optimized versions of common operations (RMS norm, rotary embeddings, etc.) that take advantage of Ascend hardware capabilities.
+  </Card>
+  <Card title="vllm_ascend/attention/" icon="layers">
+    Attention backend implementations for Ascend. Provides `attention_v1.py` for standard multi-head attention, `mla_v1.py` for Multi-Head Latent Attention (used by DeepSeek models), and context-parallel variants under `context_parallel/`.
+  </Card>
+  <Card title="vllm_ascend/distributed/" icon="network">
+    Distributed communication using HCCL (the Ascend collective communications library). Wraps vLLM's distributed abstractions to use Ascend-native all-reduce, all-gather, and send/recv primitives.
+  </Card>
+  <Card title="vllm_ascend/quantization/" icon="minimize-2">
+    Quantization support for Ascend hardware, including W8A8 and W4A8 quantization schemes. Integrates with vLLM's quantization framework while using Ascend-specific dequantization operators.
+  </Card>
+  <Card title="vllm_ascend/envs.py" icon="settings">
+    Centralized registry for all `VLLM_ASCEND_*` environment variables. Every runtime configuration option must be defined here with documentation, defaults, and valid ranges.
+  </Card>
+</CardGroup>
+
+## Patching pattern
+
+The patch system is the primary mechanism for adapting upstream vLLM model behavior to Ascend hardware without maintaining a fork. Two categories of patches exist:
+
+**Platform patches** (`vllm_ascend/patch/platform/`): Applied in the vLLM main process early during startup via `AscendPlatform.pre_register_and_update()`. Use these for distributed utilities, scheduling logic, and any code that runs before workers are spawned.
+
+**Worker patches** (`vllm_ascend/patch/worker/`): Applied inside each worker process via `NPUWorker.__init__()`. Use these for model-specific forward pass overrides.
+
+A minimal patch looks like this:
+
+```python
+# vllm_ascend/patch/worker/patch_deepseek.py
+from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
+
+def forward(self, input_ids, positions, ...):
+    # NPU-specific forward implementation
+    ...
+
+DeepseekV2Model.forward = forward  # Replace the upstream method
+```
+
+Each patch file must be imported in the corresponding `__init__.py` and documented in `vllm_ascend/patch/__init__.py` with the following fields: why the patch is needed, how it works, a link to the related upstream PR (or justification for why there isn't one), and a future plan for removal.
+
+<Warning>
+  Patching is a temporary solution, not a first choice. Before adding a patch, confirm there is no cleaner path through inheritance or upstream contribution. Every new patch requires an architectural review.
+</Warning>
+
+## ACL Graph system
+
+ACL Graph is the Ascend equivalent of CUDA Graph—it captures the computation graph of a forward pass and replays it with reduced host-launch overhead for repeated identical shapes.
+
+vLLM selects the Ascend graph wrapper through `AscendPlatform.get_static_graph_wrapper_cls()`, which returns `ACLGraphWrapper` from `vllm_ascend/compilation/acl_graph.py`. The wrapper:
+
+1. Reads the runtime mode and `batch_descriptor` from the forward context.
+2. Decides whether to run eagerly, capture a new ACL graph, or replay a cached one.
+3. Before replay, calls `update_full_graph_params()` on each attention backend to refresh runtime metadata (attention masks, KV cache pointers, etc.) that must be updated even though the graph is otherwise static.
+
+**Capture size bucketing**: vLLM prepares a finite set of capture sizes (`1, 2, 4, 8, 16, 24, ...`). At runtime, each batch is padded to the nearest capture size. On Ascend, the number of capture sizes is further limited by stream budget—`vllm_ascend.utils.update_aclgraph_sizes()` trims the set to stay within device stream limits.
+
+**Piecewise vs. full graph**: Piecewise mode captures only the non-attention segments of each forward pass and is the more conservative default. Full graph mode captures the entire forward pass including attention, but requires each attention backend to implement `update_graph_params()` hooks for host-side parameter refresh.
+
+<Note>
+  `ASCEND_LAUNCH_BLOCKING=1` is incompatible with ACL Graph mode. Setting it while graph mode is enabled will cause an error at startup.
+</Note>
+
+## How a model forward pass flows through the system
+
+The sequence below traces a single decode-phase forward pass:
+
+<Steps>
+  <Step title="Request arrives at the engine">
+    The vLLM scheduler selects a batch and passes it to the engine core. vLLM's scheduler and engine core code runs unmodified; the plugin only intercepts at well-defined extension points.
+  </Step>
+  <Step title="Worker receives execute_model()">
+    `NPUWorker.execute_model()` is called. If worker patches are not yet applied, they are applied now via `NPUWorker.__init__()`.
+  </Step>
+  <Step title="Model runner prepares inputs">
+    `NPUModelRunner.prepare_model_input()` builds the input tensors and attention metadata for the batch. NPU-specific tensor layouts and padding strategies are applied here.
+  </Step>
+  <Step title="ACL Graph dispatch">
+    `ACLGraphWrapper` checks whether the batch descriptor matches a captured graph. On a cache hit, it calls `update_full_graph_params()` to refresh attention parameters, then replays the graph. On a miss for a valid capture size, it runs eagerly and captures a new graph.
+  </Step>
+  <Step title="Attention computation">
+    The attention backend in `vllm_ascend/attention/` executes the attention kernel using CANN operators. For full graph replay, `update_graph_params()` runs on an update stream before the replay stream starts, guarded by `torch.npu.ExternalEvent` ordering.
+  </Step>
+  <Step title="Custom ops and distributed">
+    Operations like RMS norm and rotary embeddings dispatch to NPU-optimized implementations in `vllm_ascend/ops/`. For tensor-parallel models, HCCL-backed collective operations in `vllm_ascend/distributed/` synchronize across NPU cards.
+  </Step>
+  <Step title="Sampler and output">
+    `AscendSampler` processes the logits and returns token IDs. Results propagate back through the engine to the caller.
+  </Step>
+</Steps>

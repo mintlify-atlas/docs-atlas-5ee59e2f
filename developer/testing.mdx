@@ -1,0 +1,280 @@
+---
+title: "Testing guide for vLLM Ascend contributors"
+description: "Learn how to write unit tests and E2E tests, run them locally, trigger CI workflows, and set up multi-node test environments for vLLM Ascend."
+---
+
+vLLM Ascend uses a layered testing strategy: fast unit tests that run on CPU, end-to-end tests that require NPU hardware, and nightly benchmark suites for performance regression detection. All new features must include tests before review.
+
+## Test structure
+
+<CardGroup cols={2}>
+  <Card title="Unit tests — tests/ut/" icon="flask">
+    Cover core logic, edge cases, and error conditions. All unit tests must be runnable on CPU — mock any device-specific functions. Test file paths mirror source file paths and use the `test_` prefix.
+  </Card>
+  <Card title="E2E tests — tests/e2e/" icon="play">
+    Verify end-to-end behavior and integration points. Require NPU hardware. Organized by hardware category: `singlecard/`, `multicard/2-cards/`, `multicard/4-cards/`, and `310p/`.
+  </Card>
+  <Card title="Nightly tests — tests/e2e/nightly/" icon="moon">
+    Full model accuracy tests, performance benchmarks, and operator suites that run on a schedule. Use the nightly CI trigger to run these against your PR without waiting for the scheduled run.
+  </Card>
+  <Card title="Doctests — tests/e2e/run_doctests.sh" icon="book-open">
+    Ensures code examples in documentation files remain executable. Run locally with `bash tests/e2e/run_doctests.sh`.
+  </Card>
+</CardGroup>
+
+## Writing unit tests
+
+Follow these conventions:
+
+- Place the test file at a path mirroring the source file. For example, `vllm_ascend/worker/worker.py` → `tests/ut/worker/test_worker.py`.
+- Use the `unittest` framework. See the [Python unittest documentation](https://docs.python.org/3/library/unittest.html) for details.
+- Mock all device-specific functions so tests run on CPU without hardware.
+- Cover the happy path, failure modes, and edge cases.
+- For bug fixes, include a regression test that reproduces the original issue.
+
+A minimal example structure:
+
+```python
+# tests/ut/worker/test_worker.py
+import unittest
+from unittest.mock import patch, MagicMock
+
+class TestNPUWorker(unittest.TestCase):
+
+    def test_init_sets_expected_attributes(self):
+        # arrange
+        ...
+        # act
+        ...
+        # assert
+        ...
+
+    def test_raises_on_invalid_config(self):
+        with self.assertRaises(ValueError):
+            ...
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+## Running tests locally
+
+### Unit tests
+
+<Tabs>
+  <Tab title="CPU (no hardware)">
+    Run unit tests on any machine, including developer laptops:
+
+    ```bash
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -m)-linux/devlib
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -sv tests/ut
+    ```
+
+    To run a single test file:
+
+    ```bash
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -sv tests/ut/test_ascend_config.py
+    ```
+
+    To run a single test case:
+
+    ```bash
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -sv tests/ut/ops/test_prepare_finalize.py::test_prepare_inputs
+    ```
+  </Tab>
+  <Tab title="Single NPU card">
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+
+    # Run all unit tests
+    pytest -sv tests/ut
+
+    # Run a specific file
+    pytest -sv tests/ut/test_ascend_config.py
+
+    # Run a specific test case
+    pytest -sv tests/ut/ops/test_prepare_finalize.py::test_prepare_inputs
+    ```
+  </Tab>
+  <Tab title="Multi-card">
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+
+    # Run all unit tests
+    pytest -sv tests/ut
+
+    # Run a specific file
+    pytest -sv tests/ut/test_ascend_config.py
+    ```
+  </Tab>
+</Tabs>
+
+### E2E tests
+
+E2E tests require NPU hardware and cannot run on CPU.
+
+<Tabs>
+  <Tab title="Single card">
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+
+    # Run all single-card E2E tests
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/
+
+    # Run a specific test file
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_camem.py
+
+    # Run a specific test case
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_camem.py::test_end_to_end
+    ```
+  </Tab>
+  <Tab title="Multi-card (2 cards)">
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+
+    # Run all 2-card tests
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/multicard/2-cards/
+
+    # Run a specific test file
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/multicard/2-cards/test_qwen3_moe.py
+    ```
+  </Tab>
+  <Tab title="Nightly (single node)">
+    ```bash
+    cd /vllm-workspace/vllm-ascend/
+
+    # Run all nightly single-card operator tests
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/
+
+    # Run a specific model test
+    export CONFIG_YAML_PATH=Qwen3-32B.yaml
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
+    ```
+  </Tab>
+</Tabs>
+
+## CI system
+
+### PR-triggered CI
+
+GitHub Actions runs lint and unit tests automatically on every pull request. The E2E test suite runs when you add both the `ready` and `ready-for-test` labels to your PR.
+
+To run only specific E2E tests without the full suite, post a comment specifying the test paths, then add the `ready` label:
+
+```text
+/e2e tests/e2e/singlecard/test_offline_inference.py
+```
+
+The comment must come **before** the label is added. The workflow routes test paths to the correct hardware automatically:
+
+| Path pattern | Hardware |
+|---|---|
+| `multicard/2-cards` in path | 2-card A3 NPU |
+| `multicard/4-cards` in path | 4-card A3 NPU |
+| `310p` in path | Ascend 310P |
+| All other paths | Singlecard A2 NPU |
+
+<Note>
+  Only the PR author or collaborators with write or admin access can trigger tests via comment. If you do not have permission, ask a maintainer to post the `/e2e` comment.
+</Note>
+
+### Nightly CI
+
+Nightly tests run on a schedule using pre-built nightly images. To trigger nightly tests against your PR code, post a comment before adding the `nightly-test` label:
+
+```text
+# Run all nightly tests
+/nightly
+
+# Run specific tests
+/nightly test_custom_op qwen3-32b
+```
+
+<Warning>
+  The A3 resource pool has a maximum concurrency of 5×16 NPUs. Prefer targeting specific test names rather than running `/nightly all` on A3.
+</Warning>
+
+### Viewing CI results
+
+After a CI job finishes, open the GitHub Actions job page and check the **Summary** tab. The summary shows failed test files, failed test cases, root-cause errors, and short error context extracted from the job log.
+
+## Test requirements for new features
+
+| Change type | Required tests |
+|---|---|
+| New operator or function | Unit test in `tests/ut/` covering happy path and failure modes |
+| New model support | E2E test in `tests/e2e/singlecard/` or `tests/e2e/multicard/` |
+| Bug fix | Regression unit test that reproduces the original issue |
+| Performance-critical change | Benchmark using the `vllm bench` suite; include before/after numbers in the PR |
+| New environment variable | Unit test verifying correct default behavior |
+
+## Multi-node testing setup
+
+Multi-node tests validate distributed scenarios for very large models, such as disaggregated prefill across multiple nodes.
+
+### Using Kubernetes
+
+If you have a Kubernetes cluster with Ascend NPUs:
+
+<Steps>
+  <Step title="Install LWS CRD resources">
+    See the [LWS installation guide](https://lws.sigs.k8s.io/docs/installation/) for setup instructions.
+  </Step>
+  <Step title="Configure and deploy the LeaderWorkerSet">
+    Create a `lws.yaml` that defines the leader and worker pods. Each pod runs `tests/e2e/nightly/multi_node/scripts/run.sh` as its entrypoint, and nodes coordinate via the `LWS_WORKER_INDEX` environment variable.
+
+    ```bash
+    kubectl apply -f lws.yaml
+    kubectl get pods -n vllm-project
+    ```
+  </Step>
+  <Step title="Monitor logs">
+    ```bash
+    kubectl logs -f vllm-0 -n vllm-project
+    ```
+  </Step>
+</Steps>
+
+### Without Kubernetes
+
+If you do not have a Kubernetes cluster, run multi-node tests directly on the hosts:
+
+<Steps>
+  <Step title="Add cluster_hosts to the config YAML">
+    Modify the test config (for example, `tests/e2e/nightly/multi_node/config/DeepSeek-V3.yaml`) to add the IP addresses of your cluster nodes:
+
+    ```yaml
+    cluster_hosts: ["192.168.1.10", "192.168.1.11"]
+    ```
+  </Step>
+  <Step title="Install development environment on every node">
+    ```bash
+    cd /vllm-workspace/vllm-ascend
+    python3 -m pip install -r requirements-dev.txt
+    ```
+  </Step>
+  <Step title="Run the test script on each node">
+    Execute the following on **each node** simultaneously:
+
+    ```bash
+    export WORKSPACE=/vllm-workspace
+    export CONFIG_YAML_PATH="DeepSeek-V3.yaml"
+    cd $WORKSPACE/vllm-ascend
+    bash tests/e2e/nightly/multi_node/scripts/run.sh
+    ```
+  </Step>
+</Steps>
+
+### Adding a new multi-node test case
+
+<Steps>
+  <Step title="Upload custom model weights to ModelScope">
+    Upload weights to the [vllm-ascend organization on ModelScope](https://www.modelscope.cn/organization/vllm-ascend). Contact a maintainer if you need upload permissions.
+  </Step>
+  <Step title="Add a config YAML">
+    Create a YAML file in `tests/e2e/nightly/multi_node/config/` describing the cluster topology, environment variables, and vLLM serve commands for each node.
+  </Step>
+  <Step title="Register the case in the nightly workflow">
+    Add an entry to the matrix in `.github/workflows/schedule_nightly_test_a3.yaml` with the `name`, `config_file_path`, and `size` (number of nodes) fields.
+  </Step>
+</Steps>

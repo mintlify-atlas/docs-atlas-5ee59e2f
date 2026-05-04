@@ -1,0 +1,226 @@
+---
+title: "Parallelism strategies for scaling Ascend NPU inference"
+description: "Scale LLM inference across Ascend NPUs using tensor, pipeline, expert, context, and data parallelism, with example commands for multi-card deployments."
+---
+
+vLLM Ascend supports several complementary parallelism strategies that you can combine to maximize throughput and memory efficiency when running large language models across multiple Ascend NPUs. Choosing the right combination depends on your model architecture, sequence lengths, and available hardware.
+
+## Tensor parallelism
+
+Tensor parallelism (TP) shards individual weight matrices across NPUs so each card holds and computes only a slice of every linear layer. It is the most commonly used strategy and works well for any model size.
+
+Set `--tensor-parallel-size` to the number of NPUs you want to shard across. All NPUs must be on the same node (or connected via HCCS) unless you also enable pipeline parallelism.
+
+```bash
+vllm serve Qwen/Qwen3-32B \
+    --tensor-parallel-size 8 \
+    --max-model-len 32768
+```
+
+For offline inference, pass `tensor_parallel_size` to `LLM`:
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM(
+    model="Qwen/Qwen3-32B",
+    tensor_parallel_size=8,
+)
+```
+
+<Note>
+TP requires the number of attention heads to be divisible by `tensor_parallel_size`. Check the model's `config.json` for `num_attention_heads` before choosing a value.
+</Note>
+
+## Pipeline parallelism
+
+Pipeline parallelism (PP) splits the model's layers across multiple groups of NPUs. Each group handles a contiguous slice of transformer blocks and passes activations to the next stage. Use PP to deploy models that are too large to fit on a single TP group, or to span multiple nodes.
+
+```bash
+vllm serve deepseek-ai/DeepSeek-V3 \
+    --tensor-parallel-size 8 \
+    --pipeline-parallel-size 2 \
+    --max-model-len 131072
+```
+
+This example uses 16 NPUs in total: 2 pipeline stages, each running on 8 NPUs with tensor parallelism.
+
+### Dynamic chunked pipeline parallelism
+
+When serving long-context requests with pipeline parallelism, static chunk sizes can cause load imbalance between prefill stages. Dynamic Chunked Pipeline Parallelism (CPP) profiles the pipeline in real time and adjusts the prefill chunk size dynamically to minimize bubble time.
+
+Enable it by setting `profiling_chunk_config.enabled` inside `--additional-config`:
+
+```bash
+vllm serve deepseek-ai/DeepSeek-V3.1-W8A8 \
+    --tensor-parallel-size 8 \
+    --pipeline-parallel-size 2 \
+    --enable-expert-parallel \
+    --enable-chunked-prefill \
+    --max-model-len 131072 \
+    --max-num-batched-tokens 32768 \
+    --additional-config '{
+        "profiling_chunk_config": {
+            "enabled": true,
+            "smooth_factor": 1.0,
+            "min_chunk": 4096
+        }
+    }'
+```
+
+| Parameter | Description |
+|---|---|
+| `enabled` | Activates dynamic chunk-size calculation |
+| `smooth_factor` | Weight given to the dynamic prediction (0 < x ≤ 1.0; higher = trusts prediction more) |
+| `min_chunk` | Minimum chunk size in tokens; must be smaller than `max-num-batched-tokens` |
+
+On DeepSeek-V3.1-W8A8 with 128 k input, CPP reduces TTFT from 27.0 s to 22.5 s compared to static pipeline parallelism.
+
+## Expert parallelism for MoE models
+
+Expert parallelism (EP) distributes the experts of a Mixture-of-Experts (MoE) layer across NPUs so that each card holds only a subset of experts. Combine EP with TP for large MoE models such as DeepSeek.
+
+Enable EP with `--enable-expert-parallel`:
+
+```bash
+vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --max-model-len 17000
+```
+
+### Large-scale EP with EPLB
+
+At very large EP sizes (e.g., EP=32 or EP=64 in PD-disaggregated deployments), expert load can become uneven as different requests activate different experts. The Dynamic Expert Load Balancing (EPLB) feature rebalances expert assignment at runtime to keep all NPUs busy.
+
+Set the `DYNAMIC_EPLB` environment variable to `true` to enable it:
+
+```bash
+export DYNAMIC_EPLB=true
+```
+
+### MC2 fused dispatch for MoE
+
+The `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable controls fused communication-compute operators for MoE dispatch:
+
+| Value | Behavior |
+|---|---|
+| `0` (default) | Standard AllToAll + MC2 |
+| `1` | Enables `dispatch_ffn_combine` (W8A8, EP ≤ 32, non-MTP, no EPLB) |
+| `2` | Enables `dispatch_gmm_combine_decode` for decode-node MoE (W8A8, decode only) |
+
+```bash
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+```
+
+## Context parallelism for long sequences
+
+Context parallelism (CP) splits the sequence dimension across NPUs during both prefill and decode. This reduces TTFT for very long prompts and gives the KV cache more room to grow during decode, increasing batch size and throughput.
+
+CP has two sub-modes:
+
+- **PCP** (Prefill Context Parallel) — reduces TTFT by distributing the attention computation over query tokens during prefill
+- **DCP** (Decode Context Parallel) — reduces KV cache duplication and allows larger batch sizes during decode
+
+Enable both with `--prefill-context-parallel-size` and `--decode-context-parallel-size`:
+
+```bash
+vllm serve deepseek-ai/DeepSeek-V2-Lite \
+    --tensor-parallel-size 2 \
+    --prefill-context-parallel-size 2 \
+    --decode-context-parallel-size 2
+```
+
+<Note>
+The total world size equals `tensor_parallel_size × prefill_context_parallel_size`. The command above requires 4 NPUs.
+</Note>
+
+### Constraints
+
+For **MLA-based models** (e.g., DeepSeek-R1):
+- `tensor_parallel_size >= decode_context_parallel_size`
+- `tensor_parallel_size % decode_context_parallel_size == 0`
+
+For **GQA-based models** (e.g., Qwen3-235B):
+- `(tensor_parallel_size // num_key_value_heads) >= decode_context_parallel_size`
+- `(tensor_parallel_size // num_key_value_heads) % decode_context_parallel_size == 0`
+
+When using CP alongside KV cache transfer (such as PD disaggregation or KV pooling), you must also set `--cp-kv-cache-interleave-size` to match the KV cache block size (default: 128):
+
+```bash
+vllm serve deepseek-ai/DeepSeek-V2-Lite \
+    --tensor-parallel-size 2 \
+    --prefill-context-parallel-size 2 \
+    --decode-context-parallel-size 2 \
+    --cp-kv-cache-interleave-size 128 \
+    --kv-transfer-config '{"kv_connector": "MooncakeLayerwiseConnector", ...}'
+```
+
+### Performance results
+
+DeepSeek-R1-W8A8 on 64 Atlas A3 cards with PD disaggregation:
+
+| Configuration | Input 32 k | Input 64 k | Input 128 k |
+|---|---|---|---|
+| P: DP2 TP8 EP16 ×2 / D: DP32 EP32 | TTFT 9.3 s | TTFT 22.8 s | TTFT 73.2 s |
+| P: PCP2 TP8 DCP8 EP16 ×2 / D: DP32 EP32 | TTFT 7.9 s | TTFT 15.9 s | TTFT 46.0 s |
+
+## Data parallelism
+
+Data parallelism (DP) runs several independent vLLM instances in parallel, each handling a separate slice of incoming requests. Use external DP when you want to scale horizontally without modifying the model configuration.
+
+vLLM Ascend ships with a launch script and a request-length-aware load-balance proxy that distributes traffic across DP ranks.
+
+### Single-node external DP
+
+```bash
+# Launch DP4 TP4 on a node with 16 NPUs
+cd examples/external_online_dp
+python launch_online_dp.py \
+    --dp-size 4 \
+    --tp-size 4 \
+    --dp-size-local 4 \
+    --dp-rank-start 0 \
+    --dp-address x.x.x.x \
+    --dp-rpc-port 12342
+```
+
+Then start the load-balance proxy:
+
+```bash
+python dp_load_balance_proxy_server.py \
+    --host 0.0.0.0 --port 8000 \
+    --dp-hosts 127.0.0.1 127.0.0.1 127.0.0.1 127.0.0.1 \
+    --dp-ports 9000 9001 9002 9003
+```
+
+### Multi-node external DP
+
+```bash
+# Node 0 (holds DP rank 0 and 1)
+python launch_online_dp.py --dp-size 4 --tp-size 4 \
+    --dp-size-local 2 --dp-rank-start 0 \
+    --dp-address x.x.x.x --dp-rpc-port 12342
+
+# Node 1 (holds DP rank 2 and 3)
+python launch_online_dp.py --dp-size 4 --tp-size 4 \
+    --dp-size-local 2 --dp-rank-start 2 \
+    --dp-address x.x.x.x --dp-rpc-port 12342
+```
+
+## Hardware requirements summary
+
+<CardGroup cols={2}>
+  <Card title="Tensor parallelism" icon="server">
+    NPUs must share HCCS interconnect. For cross-node TP, use with pipeline parallelism. Requires `num_attention_heads` divisible by TP size.
+  </Card>
+  <Card title="Pipeline parallelism" icon="network-wired">
+    Supports multi-node deployments. At least one NPU per pipeline stage. Pair with `--enable-chunked-prefill` for long contexts.
+  </Card>
+  <Card title="Expert parallelism" icon="diagram-project">
+    Designed for MoE models (DeepSeek, Qwen3-MoE). EP size must divide the number of experts evenly. Best combined with TP.
+  </Card>
+  <Card title="Context parallelism" icon="arrows-left-right">
+    Requires at least 4 NPUs for a typical TP2+CP2 setup. Provides the greatest benefit for sequences exceeding 32 k tokens.
+  </Card>
+</CardGroup>

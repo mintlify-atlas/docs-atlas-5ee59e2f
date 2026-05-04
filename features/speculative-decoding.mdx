@@ -1,0 +1,194 @@
+---
+title: "Speculative decoding on Ascend NPUs with vLLM Ascend"
+description: "Cut inter-token latency on Ascend NPUs with n-gram, EAGLE, MTP, or suffix speculative decoding for 20–80% throughput gains without adding hardware."
+---
+
+Speculative decoding reduces inter-token latency in memory-bound LLM inference by generating draft tokens cheaply—either from a lightweight model or a heuristic—and then verifying multiple tokens in a single forward pass of the main model. vLLM Ascend supports four speculative decoding methods on Ascend NPUs.
+
+## How speculative decoding works on Ascend NPUs
+
+In each iteration, a draft engine proposes `num_speculative_tokens` candidate tokens. The main model verifies all of them in parallel. Accepted tokens advance the sequence; rejected tokens are discarded and decoding continues from the last accepted position. Because verification is a single batched forward pass, the effective throughput rises when the acceptance rate is high.
+
+On Ascend NPUs, speculative decoding works in both eager and ACL graph mode. When you use graph mode with EAGLE or MTP, the `cudagraph_capture_sizes` must be set to match the expanded token counts (see [Graph mode](/features/graph-mode) for details).
+
+## N-gram prompt lookup
+
+N-gram speculative decoding proposes tokens by matching the last few generated tokens against the original prompt. It is the simplest method and requires no additional model or installation.
+
+<Tabs>
+  <Tab title="Offline">
+    ```python
+    from vllm import LLM, SamplingParams
+
+    llm = LLM(
+        model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        tensor_parallel_size=1,
+        speculative_config={
+            "method": "ngram",
+            "num_speculative_tokens": 5,
+            "prompt_lookup_max": 4,
+        },
+    )
+
+    outputs = llm.generate(
+        ["The future of AI is"],
+        SamplingParams(temperature=0.8, top_p=0.95),
+    )
+    ```
+  </Tab>
+  <Tab title="Online">
+    ```bash
+    vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
+        --speculative-config '{"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 4}'
+    ```
+  </Tab>
+</Tabs>
+
+N-gram works best when the output frequently echoes phrases from the prompt (e.g., summarization, translation).
+
+## EAGLE draft models
+
+EAGLE uses a small fine-tuned draft model to propose tokens, achieving higher acceptance rates than n-gram on general tasks. EAGLE draft models must run without tensor parallelism (`draft_tensor_parallel_size=1`), even if the main model uses TP.
+
+<Tabs>
+  <Tab title="Offline">
+    ```python
+    from vllm import LLM, SamplingParams
+
+    llm = LLM(
+        model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        tensor_parallel_size=4,
+        distributed_executor_backend="mp",
+        enforce_eager=True,
+        async_scheduling=True,
+        speculative_config={
+            "method": "eagle",
+            "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+            "draft_tensor_parallel_size": 1,
+            "num_speculative_tokens": 2,
+        },
+    )
+    ```
+  </Tab>
+  <Tab title="Online">
+    ```bash
+    vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
+        --tensor-parallel-size 4 \
+        --enforce-eager \
+        --speculative-config '{
+            "method": "eagle",
+            "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+            "draft_tensor_parallel_size": 1,
+            "num_speculative_tokens": 2
+        }'
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+When using EAGLE-3, set `"method": "eagle3"` in `speculative_config`. The correct method string selects the right verification logic for the EAGLE-3 architecture.
+</Note>
+
+**Graph mode with EAGLE:** In full graph mode, `cudagraph_capture_sizes` must contain values of the form `n × (K + 1)` for each batch size `n` you want to support, where `K = num_speculative_tokens`. For example, with `num_speculative_tokens=4` and batch sizes 1–4:
+
+```bash
+--compilation-config '{"cudagraph_capture_sizes": [5, 10, 15, 20]}'
+```
+
+## MTP (Multi-Token Prediction)
+
+MTP is the native speculative decoding method for DeepSeek models. It leverages the model's built-in Multi-Token Prediction head to propose multiple tokens per step without a separate draft model.
+
+```bash
+vllm serve /path/to/DeepSeek-V3.2-Exp-W8A8 \
+    --port 20004 \
+    --tensor-parallel-size 16 \
+    --enable-expert-parallel \
+    --quantization ascend \
+    --max-model-len 36768 \
+    --max-num-batched-tokens 5000 \
+    --gpu-memory-utilization 0.9 \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --speculative-config '{
+        "num_speculative_tokens": 2,
+        "method": "deepseek_mtp",
+        "disable_padded_drafter_batch": "False"
+    }'
+```
+
+MTP is also the recommended approach when running DeepSeek in PD-disaggregated configurations. Set `num_speculative_tokens` to 1 for prefill nodes and 1–2 for decode nodes.
+
+## Suffix decoding
+
+Suffix decoding is a CPU-based speculative decoding method that pattern-matches the last `n` generated tokens against both the prompt and all previous generation history, using frequency counts to propose the most likely continuations. It requires no additional model or GPU/NPU resources.
+
+<Note>
+Suffix decoding requires the **Arctic Inference** package. Install it with `pip install arctic-inference`.
+</Note>
+
+<Tabs>
+  <Tab title="Offline">
+    ```python
+    from vllm import LLM, SamplingParams
+
+    llm = LLM(
+        model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        tensor_parallel_size=1,
+        enforce_eager=True,
+        speculative_config={
+            "method": "suffix",
+            "num_speculative_tokens": 15,
+        },
+    )
+
+    outputs = llm.generate(
+        ["The future of AI is"],
+        SamplingParams(temperature=0.8, top_p=0.95),
+    )
+    ```
+  </Tab>
+  <Tab title="Online">
+    ```bash
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+
+    vllm serve /data/Qwen3-32B \
+        --tensor-parallel-size 4 \
+        --speculative-config '{"method": "suffix", "num_speculative_tokens": 3}' \
+        --max-num-batched-tokens 40960
+    ```
+  </Tab>
+</Tabs>
+
+Suffix decoding delivers the biggest gains on tasks with high repetition. Benchmarks on Qwen3-32B with 4 Atlas A2 NPUs show:
+
+| Dataset | Throughput improvement |
+|---|---|
+| AGIEval | 50–80% |
+| GSM8K | 33–58% |
+| HumanEval | 28–45% |
+| ARC / ShareGPT | 20–35% |
+
+## Choosing a method
+
+<CardGroup cols={2}>
+  <Card title="N-gram" icon="magnifying-glass">
+    Zero setup, works on any model. Best when output echoes the prompt directly (summarization, translation, RAG).
+  </Card>
+  <Card title="EAGLE" icon="bolt">
+    Requires a fine-tuned draft model. Highest acceptance rate for general instruction-following tasks.
+  </Card>
+  <Card title="MTP" icon="layer-group">
+    Built into DeepSeek models. No extra model needed. The recommended choice for all DeepSeek deployments.
+  </Card>
+  <Card title="Suffix" icon="repeat">
+    CPU-only, no NPU overhead. Best for code generation, agentic loops, and other repetitive output patterns.
+  </Card>
+</CardGroup>
+
+## Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `VLLM_ASCEND_ENABLE_FLASHCOMM1` | `0` | Enable FlashComm V1 communication optimization for TP (recommended with suffix decoding) |
+| `HCCL_OP_EXPANSION_MODE` | — | Set to `AIV` to increase the number of supported ACL graph capture sizes |

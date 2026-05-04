@@ -1,81 +1,209 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
-icon: 'rocket'
+title: "Quickstart: run vLLM on Ascend NPU in minutes"
+description: "Set up a container, run offline batched inference, and serve an OpenAI-compatible API endpoint on Ascend NPU hardware using vLLM Ascend Plugin."
 ---
 
-## Get started in three steps
+This guide walks you through running your first LLM inference on an Ascend NPU. You will start a container, run a simple offline inference script, and optionally serve an OpenAI-compatible API endpoint — all using the pre-built vLLM Ascend Docker image.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+Make sure you have one of the following supported devices:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+- **Atlas A2 Training**: Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 Box16, Atlas 300T A2
+- **Atlas A2 Inference**: Atlas 800I A2
+- **Atlas A3 Training**: Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD
+- **Atlas A3 Inference**: Atlas 800I A3
+- **Atlas 300I** _(experimental)_: Atlas 300I Duo
 
-### Step 2: Deploy your changes
+You also need [Docker](https://docs.docker.com/get-docker/) installed on the host machine.
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+## Set up the container
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+Pull the pre-built vLLM Ascend image and start a container. Choose the tab for your OS.
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+<Tabs>
+  <Tab title="Ubuntu">
+    ```bash
+    # Set the device to use (update to match your NPU, e.g. /dev/davinci0)
+    export DEVICE=/dev/davinci0
 
-### Step 3: Go live
+    # Choose the image for your hardware:
+    #   Atlas A2: quay.io/ascend/vllm-ascend:v0.13.0
+    #   Atlas A3: quay.io/ascend/vllm-ascend:v0.13.0-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    docker run --rm \
+      --name vllm-ascend \
+      --shm-size=1g \
+      --device $DEVICE \
+      --device /dev/davinci_manager \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /root/.cache:/root/.cache \
+      -p 8000:8000 \
+      -it $IMAGE bash
+
+    # Inside the container, install curl for API testing
+    apt-get update -y && apt-get install -y curl
+    ```
+  </Tab>
+  <Tab title="openEuler">
+    ```bash
+    # Set the device to use (update to match your NPU, e.g. /dev/davinci0)
+    export DEVICE=/dev/davinci0
+
+    # Choose the image for your hardware:
+    #   Atlas A2: quay.io/ascend/vllm-ascend:v0.13.0-openeuler
+    #   Atlas A3: quay.io/ascend/vllm-ascend:v0.13.0-a3-openeuler
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0-openeuler
+
+    docker run --rm \
+      --name vllm-ascend \
+      --shm-size=1g \
+      --device $DEVICE \
+      --device /dev/davinci_manager \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /root/.cache:/root/.cache \
+      -p 8000:8000 \
+      -it $IMAGE bash
+
+    # Inside the container, install curl for API testing
+    yum update -y && yum install -y curl
+    ```
+  </Tab>
+</Tabs>
+
+The default working directory inside the container is `/workspace`. vLLM and vLLM Ascend source code are located in `/vllm-workspace` and installed in development mode, so any source changes take effect immediately.
+
+<Tip>
+  If model downloads from Hugging Face are slow or unavailable, set `VLLM_USE_MODELSCOPE` to use ModelScope as a mirror:
+
+  ```bash
+  export VLLM_USE_MODELSCOPE=True
+  pip install modelscope
+  ```
+</Tip>
+
+## Run inference
+
+Choose between offline batched inference or serving an OpenAI-compatible API endpoint.
+
+<Tabs>
+  <Tab title="Offline batched inference">
+    Offline batched inference lets you generate text for a list of prompts directly from a Python script — no server required.
+
+    Save the following script as `inference.py` inside the container:
+
+    ```python
+    from vllm import LLM, SamplingParams
+
+    prompts = [
+        "Hello, my name is",
+        "The future of AI is",
+    ]
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+
+    # The first run downloads the model (~3-5 minutes at 10 MB/s)
+    llm = LLM(model="Qwen/Qwen3-0.6B")
+
+    outputs = llm.generate(prompts, sampling_params)
+
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    ```
+
+    Run the script:
+
+    ```bash
+    python inference.py
+    ```
+
+    You should see output similar to:
+
+    ```shell
+    INFO Platform plugin ascend is activated
+    Prompt: 'Hello, my name is', Generated text: " Shinji, a teenage boy from New York City..."
+    Prompt: 'The future of AI is', Generated text: ' not bright\n\nThere is no doubt that...'
+    ```
+
+    The log line `INFO Platform plugin ascend is activated` confirms the plugin loaded successfully.
+  </Tab>
+  <Tab title="OpenAI Completions API">
+    vLLM can serve an OpenAI-compatible REST API. Start the server in the background:
+
+    ```bash
+    # The first run downloads the model (~3-5 minutes at 10 MB/s)
+    vllm serve Qwen/Qwen3-0.6B &
+    ```
+
+    Wait until you see the startup confirmation:
+
+    ```shell
+    INFO:     Application startup complete.
+    INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+    ```
+
+    **List available models:**
+
+    ```bash
+    curl http://localhost:8000/v1/models | python3 -m json.tool
+    ```
+
+    **Send a completion request:**
+
+    ```bash
+    curl http://localhost:8000/v1/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "Qwen/Qwen3-0.6B",
+            "prompt": "Beijing is a",
+            "max_completion_tokens": 5,
+            "temperature": 0
+        }' | python3 -m json.tool
+    ```
+
+    **Stop the server:**
+
+    ```bash
+    VLLM_PID=$(pgrep -f "vllm serve")
+    kill -2 "$VLLM_PID"
+    ```
+
+    You should see a clean shutdown:
+
+    ```shell
+    INFO:     Shutting down FastAPI HTTP server.
+    INFO:     Application shutdown complete.
+    ```
+  </Tab>
+</Tabs>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Supported models" icon="list" href="/user-guide/supported-models">
+    See which model architectures are supported and what features each one enables on Ascend NPU.
+  </Card>
+  <Card title="Parallelism" icon="server" href="/features/parallelism">
+    Configure tensor, pipeline, and expert parallelism to scale inference across multiple NPUs or nodes.
+  </Card>
+  <Card title="DeepSeek tutorial" icon="book-open" href="/tutorials/deepseek">
+    Follow a step-by-step tutorial for deploying DeepSeek models on Ascend NPU.
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Learn more about pip installation, building from source, and multi-node setup.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

@@ -1,0 +1,473 @@
+---
+title: "Running Qwen3 models on Ascend NPU"
+description: "Deploy Qwen3 dense and MoE models on Ascend NPU, including quantization, embedding, reranker, and multi-node expert parallelism configurations."
+---
+
+The vLLM Ascend plugin supports the full Qwen3 model family, covering dense models from 0.6B to 32B parameters, large MoE models such as Qwen3-235B-A22B and Qwen3-30B-A3B, quantized variants (W8A8 and W4A8), and pooling models for embedding and reranking. This page walks you through environment setup, serving commands, and hardware recommendations for each category.
+
+## Hardware recommendations
+
+| Model | Minimum hardware |
+|---|---|
+| Qwen3-0.6B / 1.7B / 4B / 8B | 1× Atlas 800I A2 (64 GB × 1) or 1× Atlas 800 A3 (64 GB × 2) |
+| Qwen3-14B | 2× Atlas 800I A2 cards or 1× Atlas 800 A3 (64 GB × 2) |
+| Qwen3-32B / 32B-W8A8 | 4× Atlas 800I A2 cards or 2× Atlas 800 A3 (64 GB × 4) |
+| Qwen3-235B-A22B / W8A8 | 1× Atlas 800 A3 (64 GB × 16), 1× Atlas 800 A2 (64 GB × 8), or 2× Atlas 800 A2 (32 GB × 8) |
+| Qwen3-30B-A3B | 4× NPU cards (Atlas A2 64 GB or Atlas A3) |
+| Qwen3-8B-W4A8 | 1× Atlas 800I A2 single card |
+
+## Dense models (Qwen3-0.6B to 32B)
+
+Qwen3 dense models use the standard transformer architecture and run on one or more NPU cards. The example below uses `Qwen3-32B-W8A8` on Atlas A3 with TP=4 and DP=1, which is the recommended configuration for maximizing throughput at 3.5K input / 1.5K output.
+
+### Environment setup
+
+Pull the official image and start the container:
+
+```bash
+# For Atlas A2 machines:
+# export IMAGE=quay.io/ascend/vllm-ascend:<version>
+# For Atlas A3 machines:
+export IMAGE=quay.io/ascend/vllm-ascend:<version>-a3
+
+docker run --rm \
+  --name vllm-ascend \
+  --shm-size=1g \
+  --privileged=true \
+  --device /dev/davinci0 \
+  --device /dev/davinci1 \
+  --device /dev/davinci2 \
+  --device /dev/davinci3 \
+  --device /dev/davinci_manager \
+  --device /dev/devmm_svm \
+  --device /dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -v /root/.cache:/root/.cache \
+  -p 8113:8113 \
+  -it $IMAGE bash
+```
+
+### Online serving (multi-NPU)
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export TASK_QUEUE_ENABLE=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
+vllm serve vllm-ascend/Qwen3-32B-W8A8 \
+  --served-model-name qwen3 \
+  --trust-remote-code \
+  --async-scheduling \
+  --quantization ascend \
+  --distributed-executor-backend mp \
+  --tensor-parallel-size 4 \
+  --max-model-len 5500 \
+  --max-num-batched-tokens 40960 \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+  --additional-config '{"pa_shape_list":[48,64,72,80], "weight_prefetch_config":{"enabled":true}}' \
+  --port 8113 \
+  --block-size 128 \
+  --gpu-memory-utilization 0.9
+```
+
+<Note>
+  Remove `--quantization ascend` if you are using a non-quantized model. The `pa_shape_list` option switches the attention operator from FIA to PA for the listed batch sizes, which can prevent performance degradation in some concurrency scenarios.
+</Note>
+
+Query the running server:
+
+```bash
+curl http://localhost:8113/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3",
+    "messages": [{"role": "user", "content": "Give me a short introduction to large language models."}],
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20,
+    "max_completion_tokens": 4096
+  }'
+```
+
+### Offline inference (multi-NPU)
+
+```python
+import gc
+import torch
+from vllm import LLM, SamplingParams
+from vllm.distributed.parallel_state import (
+    destroy_distributed_environment, destroy_model_parallel
+)
+
+def clean_up():
+    destroy_model_parallel()
+    destroy_distributed_environment()
+    gc.collect()
+    torch.npu.empty_cache()
+
+prompts = ["Hello, my name is", "The future of AI is"]
+sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
+
+llm = LLM(
+    model="vllm-ascend/Qwen3-32B-W8A8",
+    tensor_parallel_size=4,
+    trust_remote_code=True,
+    distributed_executor_backend="mp",
+    max_model_len=5500,
+    max_num_batched_tokens=5500,
+    quantization="ascend",
+    compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+)
+
+outputs = llm.generate(prompts, sampling_params)
+for output in outputs:
+    print(f"Prompt: {output.prompt!r}, Generated: {output.outputs[0].text!r}")
+
+del llm
+clean_up()
+```
+
+### Key optimization techniques
+
+<CardGroup cols={2}>
+  <Card title="FlashComm v1" icon="bolt">
+    Set `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` to decompose allreduce into reduce-scatter + all-gather, reducing communication overhead in high-concurrency prefill scenarios.
+  </Card>
+  <Card title="Weight prefetching" icon="arrow-down">
+    Enable with `weight_prefetch_config: {enabled: true}` in `--additional-config` to preload MLP weights into L2 cache, hiding memory transfer latency during computation.
+  </Card>
+  <Card title="Full-graph ACLGraph" icon="chart-bar">
+    Use `"cudagraph_mode": "FULL_DECODE_ONLY"` to replay the entire decode graph in a single pass, reducing operator dispatch latency.
+  </Card>
+  <Card title="Async scheduling" icon="clock">
+    Pass `--async-scheduling` to overlap task scheduling with computation for higher throughput at scale.
+  </Card>
+</CardGroup>
+
+### Accuracy reference (Qwen3-32B-W8A8, vllm-ascend 0.11.0rc2)
+
+| Dataset | Metric | Score |
+|---|---|---|
+| GSM8K | accuracy | 96.44 |
+| MATH500 | accuracy | 97.60 |
+| AIME 2024 | accuracy | 76.67 |
+
+---
+
+## MoE models (Qwen3-235B-A22B)
+
+`Qwen3-235B-A22B` is a large MoE model supported on both Atlas A2 and A3 hardware. Use `--enable-expert-parallel` to distribute expert layers across NPUs for better throughput.
+
+### Single-node deployment
+
+The following example runs on 1× Atlas 800 A3 (64 GB × 16) or 1× Atlas 800 A2 (64 GB × 8) with TP=8 and EP enabled. It also enables long-context support (128K) using YaRN rope-scaling:
+
+```bash
+export VLLM_USE_MODELSCOPE=True
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_BUFFSIZE=512
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export TASK_QUEUE_ENABLE=1
+
+vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --tensor-parallel-size 8 \
+  --data-parallel-size 1 \
+  --seed 1024 \
+  --quantization ascend \
+  --served-model-name qwen3 \
+  --max-num-seqs 32 \
+  --max-model-len 133000 \
+  --max-num-batched-tokens 8096 \
+  --enable-expert-parallel \
+  --trust-remote-code \
+  --gpu-memory-utilization 0.95 \
+  --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --async-scheduling
+```
+
+<Note>
+  The `--hf-overrides` YaRN rope-scaling parameter is required for 128K context with the base `Qwen3-235B-A22B` weights (which have a 40K native context). If you use `Qwen3-235B-A22B-Instruct-2507` or other variants that natively support long context, omit this parameter.
+</Note>
+
+### Multi-node deployment with MP
+
+<Tabs>
+  <Tab title="Node 0 (master)">
+    ```bash
+    export VLLM_USE_MODELSCOPE=True
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    nic_name="xxxx"
+    local_ip="xxxx"
+
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=1024
+    export TASK_QUEUE_ENABLE=1
+
+    vllm serve Qwen/Qwen3-235B-A22B \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --data-parallel-size 2 \
+      --api-server-count 2 \
+      --data-parallel-size-local 1 \
+      --data-parallel-address $local_ip \
+      --data-parallel-rpc-port 13389 \
+      --seed 1024 \
+      --served-model-name qwen3 \
+      --tensor-parallel-size 8 \
+      --enable-expert-parallel \
+      --max-num-seqs 16 \
+      --max-model-len 32768 \
+      --max-num-batched-tokens 4096 \
+      --trust-remote-code \
+      --async-scheduling \
+      --gpu-memory-utilization 0.9
+    ```
+  </Tab>
+  <Tab title="Node 1">
+    ```bash
+    export VLLM_USE_MODELSCOPE=True
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    nic_name="xxxx"
+    local_ip="xxxx"
+    node0_ip="xxxx"
+
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=1024
+    export TASK_QUEUE_ENABLE=1
+
+    vllm serve Qwen/Qwen3-235B-A22B \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --headless \
+      --data-parallel-size 2 \
+      --data-parallel-size-local 1 \
+      --data-parallel-start-rank 1 \
+      --data-parallel-address $node0_ip \
+      --data-parallel-rpc-port 13389 \
+      --seed 1024 \
+      --tensor-parallel-size 8 \
+      --served-model-name qwen3 \
+      --max-num-seqs 16 \
+      --max-model-len 32768 \
+      --max-num-batched-tokens 4096 \
+      --enable-expert-parallel \
+      --trust-remote-code \
+      --async-scheduling \
+      --gpu-memory-utilization 0.9
+    ```
+  </Tab>
+</Tabs>
+
+### Performance reference (Qwen3-235B-A22B-W8A8, single A3 node)
+
+| Requests | Concurrency | Mean TTFT | Mean TPOT | Output tok/s |
+|---|---|---|---|---|
+| 720 | 144 | 4717 ms | 48.69 ms | 2761 |
+
+### PD disaggregation reference (3-node A3)
+
+Using 1 prefill node + 2 decode nodes on Atlas 800 A3:
+
+| Requests | Concurrency | Mean TTFT | Mean TPOT | Output tok/s |
+|---|---|---|---|---|
+| 2880 | 576 | 3736 ms | 52.07 ms | 8593 |
+
+---
+
+## Qwen3-30B-A3B on Atlas A3
+
+`Qwen3-30B-A3B` is a smaller MoE model that runs on a subset of A2 or A3 cards. Use `--tensor-parallel-size 4` with `--enable-expert-parallel`.
+
+### Docker setup
+
+```bash
+# For Atlas A3 machines:
+export IMAGE=quay.io/ascend/vllm-ascend:<version>-a3
+
+docker run --rm \
+  --name vllm-ascend \
+  --shm-size=1g \
+  --device /dev/davinci0 \
+  --device /dev/davinci1 \
+  --device /dev/davinci2 \
+  --device /dev/davinci3 \
+  --device /dev/davinci_manager \
+  --device /dev/devmm_svm \
+  --device /dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -v /root/.cache:/root/.cache \
+  -p 8000:8000 \
+  -it $IMAGE bash
+```
+
+### Online inference
+
+```bash
+export VLLM_USE_MODELSCOPE=True
+export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
+
+vllm serve Qwen/Qwen3-30B-A3B --tensor-parallel-size 4 --enable-expert-parallel
+```
+
+<Note>
+  For Atlas A2 with 64 GB NPU memory, `--tensor-parallel-size 2` is the minimum. For 32 GB memory, use `--tensor-parallel-size 4` or higher.
+</Note>
+
+### Offline inference
+
+```python
+from vllm import LLM, SamplingParams
+import gc, torch
+from vllm.distributed.parallel_state import (
+    destroy_distributed_environment, destroy_model_parallel
+)
+
+def clean_up():
+    destroy_model_parallel()
+    destroy_distributed_environment()
+    gc.collect()
+    torch.npu.empty_cache()
+
+prompts = ["Hello, my name is", "The future of AI is"]
+sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
+
+llm = LLM(
+    model="Qwen/Qwen3-30B-A3B",
+    tensor_parallel_size=4,
+    distributed_executor_backend="mp",
+    max_model_len=4096,
+    enable_expert_parallel=True,
+)
+
+outputs = llm.generate(prompts, sampling_params)
+for output in outputs:
+    print(f"Prompt: {output.prompt!r}, Generated: {output.outputs[0].text!r}")
+
+del llm
+clean_up()
+```
+
+---
+
+## W4A8 quantization (Qwen3-8B-W4A8)
+
+<Note>
+  W4A8 quantization support requires vllm-ascend v0.9.1rc2 or later.
+</Note>
+
+You can use a pre-quantized model from ModelScope or quantize the model yourself using msmodelslim.
+
+### Converting the model (optional)
+
+```bash
+git clone -b br_release_MindStudio_8.1.RC2_TR5_20260624 https://gitcode.com/Ascend/msit
+cd msit/msmodelslim
+bash install.sh
+pip install accelerate
+
+cd example/Qwen
+MODEL_PATH=/home/models/Qwen3-8B
+SAVE_PATH=/home/models/Qwen3-8B-w4a8
+export ASCEND_RT_VISIBLE_DEVICES=0
+
+python quant_qwen.py \
+  --model_path $MODEL_PATH \
+  --save_directory $SAVE_PATH \
+  --device_type npu \
+  --model_type qwen3 \
+  --calib_file None \
+  --anti_method m6 \
+  --anti_calib_file ./calib_data/mix_dataset.json \
+  --w_bit 4 \
+  --a_bit 8 \
+  --is_lowbit True \
+  --open_outlier False \
+  --group_size 256 \
+  --is_dynamic True \
+  --trust_remote_code True \
+  --w_method HQQ
+```
+
+### Serving the quantized model
+
+```bash
+export VLLM_USE_MODELSCOPE=True
+export MODEL_PATH=vllm-ascend/Qwen3-8B-W4A8
+
+vllm serve ${MODEL_PATH} \
+  --served-model-name "qwen3-8b-w4a8" \
+  --max-model-len 4096 \
+  --quantization ascend
+```
+
+Query the server:
+
+```bash
+curl http://localhost:8000/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-8b-w4a8",
+    "prompt": "what is large language model?",
+    "max_completion_tokens": "128",
+    "top_p": "0.95",
+    "top_k": "40",
+    "temperature": "0.0"
+  }'
+```
+
+### Offline inference with W4A8
+
+```python
+from vllm import LLM, SamplingParams
+
+prompts = ["Hello, my name is", "The future of AI is"]
+sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
+
+llm = LLM(
+    model="/home/models/Qwen3-8B-w4a8",
+    max_model_len=4096,
+    quantization="ascend",
+)
+
+outputs = llm.generate(prompts, sampling_params)
+for output in outputs:
+    print(f"Prompt: {output.prompt!r}, Generated: {output.outputs[0].text!r}")
+```
+
+---
+
+## Embedding models (Qwen3-Embedding)
+
+`Qwen3-Embedding` is an experimental pooling model supported on Atlas A2 and A3 hardware. Use the `encode` endpoint or vLLM's `LLM` class with `task="embed"`. Refer to the [Qwen3 Embedding tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen3_embedding.html) for the full setup.
+
+---
+
+## Reranker models (Qwen3-Reranker)
+
+`Qwen3-Reranker` is an experimental pooling model for cross-encoder reranking, also supported on Atlas A2 and A3. Use the `score` endpoint or vLLM's `LLM` class with `task="score"`. Refer to the [Qwen3 Reranker tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen3_reranker.html) for details.

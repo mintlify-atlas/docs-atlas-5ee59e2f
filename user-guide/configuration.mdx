@@ -1,0 +1,200 @@
+---
+title: "Configuration reference for vLLM Ascend"
+description: "All VLLM_ASCEND_* environment variables and additional_config options for tuning vLLM Ascend runtime behavior on Huawei Ascend NPU hardware."
+---
+
+vLLM Ascend provides two complementary mechanisms for controlling runtime behavior: environment variables that you set before launching the server, and `additional_config` key-value pairs that you pass at startup time. All environment variables specific to vLLM Ascend follow the `VLLM_ASCEND_*` naming convention and are defined centrally in `vllm_ascend/envs.py`.
+
+## Environment variables
+
+### Compute and communication
+
+<ParamField path="VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE" type="bool" default="0">
+  Enables the MatmulAllReduce fusion kernel when tensor parallelism is active. This feature targets A2 hardware and provides better performance in eager mode. Set to `1` to enable.
+</ParamField>
+
+<ParamField path="VLLM_ASCEND_ENABLE_FLASHCOMM1" type="bool" default="0">
+  Enables FlashComm V1 optimization for tensor parallel communication. Improves throughput under high concurrency. Set to `1` to enable.
+</ParamField>
+
+<ParamField path="VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE" type="int" default="0">
+  Controls FlashComm V2. A value of `0` disables the feature. Any positive integer enables it and sets the O-matrix TP group size for FlashComm V2. FlashComm V2 differs from FlashComm V1 in applicable scenarios — refer to the feature guide for a comparison.
+</ParamField>
+
+<ParamField path="VLLM_ASCEND_ENABLE_MLAPO" type="bool" default="1">
+  Enables MLAPO optimization for DeepSeek W8A8 series models. MLAPO improves performance but increases NPU memory usage. Set to `0` to disable if memory is the priority constraint.
+</ParamField>
+
+<ParamField path="VLLM_ASCEND_ENABLE_NZ" type="int" default="1">
+  Controls weight cast to FRACTAL_NZ format.
+
+  - `0` — NZ format disabled
+  - `1` — NZ enabled for quantized models only (default)
+  - `2` — NZ enabled as broadly as possible
+</ParamField>
+
+<ParamField path="VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL" type="bool" default="0">
+  Enables context (sequence) parallelism. Set to `1` to split long sequences across multiple devices during prefill. Refer to the context parallel feature guide for supported models and constraints.
+</ParamField>
+
+<ParamField path="VLLM_ASCEND_ENABLE_FUSED_MC2" type="int" default="0">
+  Controls fused MC2 operators for MoE layers.
+
+  - `0` — default ALLTOALL and MC2 (no fusion)
+  - `1` — enables `dispatch_ffn_combine` for W8A8 MoE with EP≤32, non-MTP, non-dynamic-EPLB
+  - `2` — enables `dispatch_gmm_combine_decode` for decode-node W8A8 MoE (MTP layer must also be W8A8)
+</ParamField>
+
+### Scheduling
+
+<ParamField path="VLLM_ASCEND_BALANCE_SCHEDULING" type="bool" default="0">
+  Enables balance scheduling in the V1 scheduler. Only supported in PD-mixed mode (`kv_role='kv_both'` or no `kv_transfer_config`). Not supported in PD-disaggregated mode (`kv_producer` or `kv_consumer`). Set to `1` to enable.
+</ParamField>
+
+<ParamField path="DYNAMIC_EPLB" type="string" default="false">
+  Enables dynamic expert load balancing (EPLB). Set to `"true"` to allow the EPLB algorithm to rebalance expert placement at runtime based on observed load. See `eplb_config` in additional configuration for fine-grained control.
+</ParamField>
+
+### Hardware and build
+
+<ParamField path="SOC_VERSION" type="string" default="None">
+  Specifies the Ascend chip version used during package building (for example, `Ascend910B`). If not set, vLLM Ascend queries chip information via `npu-smi`. Set this explicitly if the auto-detection is not reliable in your environment.
+</ParamField>
+
+<ParamField path="ASCEND_HOME_PATH" type="string" default="None">
+  Path to the CANN toolkit installation. Defaults to `/usr/local/Ascend/ascend-toolkit/latest` when not set.
+</ParamField>
+
+<ParamField path="COMPILE_CUSTOM_KERNELS" type="bool" default="1">
+  Controls whether custom NPU kernels are compiled at install time. Set to `0` only when running unit tests in environments without NPU hardware. Do not disable in production.
+</ParamField>
+
+<ParamField path="VLLM_VERSION" type="string" default="None">
+  Overrides the detected vLLM version. Useful for developers who install vLLM from source and need to pin a specific version string for compatibility checks.
+</ParamField>
+
+---
+
+## Additional configuration
+
+The `additional_config` mechanism lets you pass structured configuration dictionaries to vLLM Ascend at server or library startup, without setting environment variables.
+
+<Tabs>
+  <Tab title="Online mode (vllm serve)">
+    ```bash
+    vllm serve Qwen/Qwen3-8B \
+      --additional-config='{"enable_kv_nz": true, "weight_prefetch_config": {"enabled": true}}'
+    ```
+  </Tab>
+  <Tab title="Offline mode (Python)">
+    ```python
+    from vllm import LLM
+
+    llm = LLM(
+        model="Qwen/Qwen3-8B",
+        additional_config={
+            "enable_kv_nz": True,
+            "weight_prefetch_config": {"enabled": True},
+        },
+    )
+    ```
+  </Tab>
+</Tabs>
+
+### Top-level options
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `refresh` | bool | `false` | Refreshes global Ascend configuration. Typically used in RLHF or test scenarios. |
+| `dump_config_path` | str | `None` | Path for msprobe dump configuration (eager mode). |
+| `enable_async_exponential` | bool | `False` | Enables asynchronous exponential overlap. |
+| `enable_shared_expert_dp` | bool | `False` | Delivers better performance for DeepSeek series models when experts are shared in DP, at the cost of higher memory usage. |
+| `multistream_overlap_shared_expert` | bool | `False` | Enables multi-stream shared expert overlap. MoE models with shared experts only. |
+| `multistream_overlap_gate` | bool | `False` | Enables multi-stream overlap gate. MoE models with shared experts only. |
+| `recompute_scheduler_enable` | bool | `False` | Enables the recompute scheduler. **Only valid in PD-disaggregated mode** (`kv_producer` or `kv_consumer`). Do not use in PD-mixed mode. |
+| `enable_cpu_binding` | bool | `True` | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. |
+| `SLO_limits_for_dynamic_batch` | int | `-1` | SLO limits for the dynamic batch scheduler. `-1` disables the feature. |
+| `enable_npugraph_ex` | bool | `False` | Enables npugraph_ex graph mode. |
+| `pa_shape_list` | list | `[]` | Custom shape list for paged attention operators. |
+| `enable_kv_nz` | bool | `False` | Enables KV cache NZ layout. Applies to MLA models such as DeepSeek series. |
+| `layer_sharding` | dict | `{}` | Layer sharding linear configuration. Can only be enabled on the P-node in PD-disaggregated mode. |
+| `enable_sparse_c8` | bool | `False` | Enables KV cache C8 for DSA models (DeepSeek V3.2, GLM5). Not supported on A5 devices. |
+| `enable_mc2_hierarchy_comm` | bool | `False` | Enables dispatch/combine inter-node communication via ROCE. |
+
+### `xlite_graph_config`
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `enabled` | bool | `False` | Enables Xlite graph mode. Supports Llama, Qwen dense, and Qwen3-VL models. |
+| `full_mode` | bool | `False` | Enables Xlite for both prefill and decode stages. Default is decode-only. |
+
+### `weight_prefetch_config`
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `enabled` | bool | `False` | Enables weight prefetch. |
+| `prefetch_ratio` | dict | `{"attn": {"qkv": 1.0, "o": 1.0}, "moe": {"gate_up": 0.8}, "mlp": {"gate_up": 1.0, "down": 1.0}}` | Prefetch ratio per weight type. |
+
+### `finegrained_tp_config`
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `lmhead_tensor_parallel_size` | int | `0` | Custom TP size for `lm_head`. |
+| `oproj_tensor_parallel_size` | int | `0` | Custom TP size for `o_proj`. |
+| `embedding_tensor_parallel_size` | int | `0` | Custom TP size for embeddings. |
+| `mlp_tensor_parallel_size` | int | `0` | Custom TP size for MLP layers. |
+
+### `ascend_compilation_config`
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `enable_npugraph_ex` | bool | `True` | Enables the npugraph_ex backend. |
+| `enable_static_kernel` | bool | `False` | Enables static kernel compilation. Best for workloads with minimal shape variation. |
+| `fuse_norm_quant` | bool | `True` | Enables the fuse_norm_quant pass. |
+| `fuse_qknorm_rope` | bool | `True` | Enables the fuse_qknorm_rope pass. Set to `False` if Triton is not available. |
+| `fuse_allreduce_rms` | bool | `False` | Enables fuse_allreduce_rms pass. Disabled by default due to conflict with SP. |
+| `fuse_muls_add` | bool | `True` | Enables the fuse_muls_add pass. |
+
+### `eplb_config`
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `dynamic_eplb` | bool | `False` | Enables dynamic EPLB. |
+| `expert_map_path` | str | `None` | Path to the expert map file for MoE load balancing. |
+| `expert_heat_collection_interval` | int | `400` | Forward iterations before EPLB begins collecting heat data. |
+| `algorithm_execution_interval` | int | `30` | Forward iterations before the EPLB worker finishes CPU-side tasks. |
+| `expert_map_record_path` | str | `None` | Directory to save expert load calculation results. |
+| `num_redundant_experts` | int | `0` | Number of redundant experts to allocate at initialization. |
+
+### `profiling_chunk_config`
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `enabled` | bool | `False` | Enables dynamic chunked pipeline parallelism. Requires `pipeline-parallel-size > 1`. |
+| `smooth_factor` | float | `1.0` | Smoothing factor (0 < x ≤ 1.0). Higher values trust dynamic predictions more. |
+| `min_chunk` | int | `4096` | Minimum chunk size. Should be smaller than `max-num-batched-tokens`. |
+| `need_timing` | bool | `True` | Enables online calibration timing. |
+
+### Full example
+
+```python
+{
+    "weight_prefetch_config": {
+        "enabled": True,
+        "prefetch_ratio": {
+            "attn": {"qkv": 1.0, "o": 1.0},
+            "moe": {"gate_up": 0.8},
+            "mlp": {"gate_up": 1.0, "down": 1.0},
+        },
+    },
+    "finegrained_tp_config": {
+        "lmhead_tensor_parallel_size": 8,
+        "oproj_tensor_parallel_size": 8,
+        "embedding_tensor_parallel_size": 8,
+        "mlp_tensor_parallel_size": 8,
+    },
+    "enable_kv_nz": False,
+    "multistream_overlap_shared_expert": True,
+    "refresh": False,
+}
+```
